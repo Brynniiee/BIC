@@ -105,16 +105,29 @@ class PreResNet(nn.Module):
         else:
             raise ValueError('block_name shoule be Basicblock or Bottleneck')
 
-        self.inplanes = 16
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1,
-                               bias=False)
-        self.layer1 = self._make_layer(block, 16, n)
-        self.layer2 = self._make_layer(block, 32, n, stride=2)
-        self.layer3 = self._make_layer(block, 64, n, stride=2)
-        self.bn = nn.BatchNorm2d(64 * block.expansion)
+        # self.inplanes = 16
+        # self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1,
+        #                        bias=False)
+        # self.layer1 = self._make_layer(block, 16, n)
+        # self.layer2 = self._make_layer(block, 64, n, stride=2)
+        # self.layer3 = self._make_layer(block, 256, n, stride=2)
+        # self.bn = nn.BatchNorm2d(256 * block.expansion)
+        # self.relu = nn.ReLU(inplace=True)
+        # self.avgpool = nn.AvgPool2d(8)
+        # self.fc = nn.Linear(256 * block.expansion, num_classes)
+
+        self.inplanes = 64
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, padding=1, bias=False)
+
+        self.layer1 = self._make_layer(block, 64, n)  # 64 → 256
+        self.layer2 = self._make_layer(block, 128, n, stride=2)  # 128 → 512
+        self.layer3 = self._make_layer(block, 256, n, stride=2)  # 256 → 1024
+
+        self.bn = nn.BatchNorm2d(256 * block.expansion)  # 256 × 4 = 1024
         self.relu = nn.ReLU(inplace=True)
         self.avgpool = nn.AvgPool2d(8)
-        self.fc = nn.Linear(64 * block.expansion, num_classes)
+        self.fc = nn.Linear(256 * block.expansion, num_classes)  # 1024 → num_classes
+
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):

@@ -9,7 +9,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision.transforms import Compose, CenterCrop, Normalize, Resize, ToTensor, ToPILImage
 from torch.optim.lr_scheduler import LambdaLR, StepLR
-
 import numpy as np
 import glob
 import PIL.Image as Image
@@ -20,8 +19,9 @@ import json
 import pickle
 from dataset import BatchData
 from model import PreResNet, BiasLayer
+from resnetPack import BiasLayer, resnet50, resnet152, resnet34
 from cifar import Cifar100
-from subcifar_debug import SubCifar100
+# from subcifar_debug import SubCifar100
 from exemplar import Exemplar
 from copy import deepcopy
 
@@ -33,7 +33,9 @@ class Trainer:
         self.num_new_cls = []
         self.dataset = Cifar100()  #for display
         #self.dataset = SubCifar100() #for debug
-        self.model = PreResNet(47,init_cls).cuda()        # formerly 32 for basicblock                          
+        self.model = PreResNet(47,init_cls).cuda()        # formerly 32 for basicblock
+## deeper model usage
+        # self.model = resnet34(init_cls).cuda()                          
         print(self.model)
         #self.model = nn.DataParallel(self.model, device_ids=[0,1])
         self.model = self.model.cuda()  # 将模型移动到 GPU 0
@@ -68,6 +70,8 @@ class Trainer:
         old_state_dict = self.model.state_dict()
         # 创建新的模型，但仅修改 fc 层
         self.model = PreResNet(47, self.total_cls + new_cls).cuda()     # formerly 32 for basicblock
+## deeper model usage
+        # self.model = resnet34(self.total_cls + new_cls).cuda()  # 创建新的模型，但仅修改 fc 层
         new_state_dict = self.model.state_dict()
 
         # 载入原有模型的参数（除 fc 层外）
@@ -99,6 +103,8 @@ class Trainer:
             # old_state_dict = self.model.state_dict()
 
             # 创建新的模型，但仅修改 fc 层
+        #save model
+        torch.save(self.model.state_dict(), 'model.pth')
             
                
 
