@@ -3,3 +3,4 @@ cifar-100-python
 __pycache__
 model.pth
 .ipynb_checkpoints
+DAS_GXW

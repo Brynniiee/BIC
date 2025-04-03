@@ -21,7 +21,6 @@ from dataset import BatchData
 from model import PreResNet, BiasLayer
 from resnetPack import BiasLayer, resnet50, resnet152, resnet34
 from cifar import Cifar100
-# from subcifar_debug import SubCifar100
 from exemplar import Exemplar
 from copy import deepcopy
 
@@ -33,6 +32,8 @@ class Trainer:
         self.num_new_cls = []
         self.dataset = Cifar100()  #for display
         #self.dataset = SubCifar100() #for debug
+        self.lossdecay = []
+        self.valacc    = []
         self.model = PreResNet(47,init_cls).cuda()        # formerly 32 for basicblock
 ## deeper model usage
         # self.model = resnet34(init_cls).cuda()                          
@@ -150,6 +151,8 @@ class Trainer:
         print("Validation Loss: {}".format(np.mean(losses)))
         print("Validation Acc: {}".format(100*correct/(correct+wrong)))
         self.model.train()
+        self.epoch_loss_mean = np.mean(losses)
+        self.valacc.append(100*correct/(correct+wrong))
         return
 
     def get_lr(self, optimizer):
@@ -166,8 +169,11 @@ class Trainer:
         dataset = self.dataset
         test_xs, test_ys, train_xs, train_ys = [], [], [], []
 
+        test_acc_noBiC = []
+        test_acc = []
         test_accs = []
         test_accs_noBiC = []
+        
         for inc_i in range(dataset.batch_num):
             print(f"Incremental num: {inc_i}")
             bias_layer = BiasLayer().cuda()
@@ -223,9 +229,8 @@ class Trainer:
                         batch_size=batch_size, shuffle=False)
             test_data = DataLoader(BatchData(test_xs, test_ys, self.input_transform_eval),
                         batch_size=batch_size, shuffle=False)
-            optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
-            # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
-            scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
+            optimizer = optim.AdamW(self.model.parameters(), lr=lr/100, betas=(0.9, 0.999), weight_decay=4e-2)
+
 
             if inc_i > 0:               # Biaslayer trained only if there is bias correction
                 # bias_optimizer = optim.SGD(self.bias_layers[inc_i].parameters(), lr=lr, momentum=0.9)
@@ -241,14 +246,16 @@ class Trainer:
             val_xs, val_ys = exemplar.get_exemplar_val()
             val_bias_data = DataLoader(BatchData(val_xs, val_ys, self.input_transform),
                         batch_size=100, shuffle=True, drop_last=False)
-            test_acc = []
-            test_acc_noBiC = []
+
+            test_acc.append([])
+            test_acc_noBiC.append([])
+
 
             for epoch in range(epoches):
                 print("---"*50)
                 print("current incremental task : ", inc_i)
                 print("Epoch", epoch)
-                scheduler.step()
+                # scheduler.step()
                 cur_lr = self.get_lr(optimizer)
                 print("Current Learning Rate : ", cur_lr)
                 self.model.train()
@@ -258,29 +265,71 @@ class Trainer:
                     self.stage1_distill(train_data, criterion, optimizer, num_new_cls)
                 else:
                     self.stage1_initial(train_data, criterion, optimizer)
+                
                 acc = self.test(test_data, inc_i)
-            test_acc_noBiC.append(acc)
-            test_accs_noBiC.append(max(test_acc_noBiC))
+                test_acc_noBiC[-1].append(acc)
+
+            test_accs_noBiC.append(max(test_acc_noBiC[-1]))
+
             if inc_i > 0:
-                for epoch in range(3*epoches):
+                for epoch in range(4*epoches):
                     # bias_scheduler.step()
                     self.model.eval()
                     for _ in range(len(self.bias_layers)):
                         self.bias_layers[_].train()
                     self.stage2(val_bias_data, criterion, bias_optimizer)
-                    if epoch % 50 == 0:
+                    if epoch % 25 == 0:
                         acc = self.test(test_data, inc_i)
-                        test_acc.append(acc)
+                        test_acc[-1].append(acc)
             for i, layer in enumerate(self.bias_layers):
                 layer.printParam(i)
             self.previous_model = deepcopy(self.model)
             acc = self.test(test_data, inc_i)
-            test_acc.append(acc)
-            test_accs.append(max(test_acc))
+            test_acc[-1].append(acc)
+            test_accs.append(max(test_acc[-1]))
             print("Test results on testset of model without BiC",test_accs_noBiC)
             print("Test results on testset after BiC training",test_accs)
-            #print("This is the result for training only the last bias layer")
-            print("This is the result for training all the bias layers")
+    
+        print("number of new classes seen in each task : ", self.num_new_cls)
+
+        # stage1 test accuracy 可视化
+        save_dir = "output"  # 当前文件夹下的 output 目录
+        os.makedirs(save_dir, exist_ok=True)  
+
+
+        plt.figure(figsize=(10, 6))  
+
+        for i in range(len(test_acc_noBiC)):
+            epochs = range(len(test_acc_noBiC[i]))
+            plt.plot(epochs, test_acc_noBiC[i], label=f"Task {i}")  
+
+        plt.xlabel("Epochs")
+        plt.ylabel("Accuracy")
+        plt.title("Accuracy Changes Over Epochs for Each Incremental Task in stage 1")
+        plt.legend()  
+        plt.grid(True)  
+
+        save_path = os.path.join(save_dir, "Stage1_accuracy_plot.png")
+        plt.savefig(save_path, dpi=300, bbox_inches='tight') 
+        print(f"Plot saved at: {save_path}")
+
+        # stage2 test accuracy 可视化
+        plt.figure(figsize=(10, 6))  
+
+        for i in range(len(test_acc)):
+            epochs = range(len(test_acc[i]))
+            plt.plot(epochs, test_acc[i], label=f"Task {i}")  
+
+        plt.xlabel("Epochs")
+        plt.ylabel("Accuracy")
+        plt.title("Accuracy Changes Over Epochs for Each Incremental Task in stage 2")
+        plt.legend()  
+        plt.grid(True)  
+        save_path = os.path.join(save_dir, "Stage2_accuracy_plot.png")
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved at: {save_path}")
+
+            
             
 
 
