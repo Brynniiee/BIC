@@ -16,7 +16,7 @@ class Cifar100:
         self.class_ranges = [(0, 20), (20, 22), (22, 26), (26, 29), (29, 30)]
         self.train_groups, self.val_groups, self.test_groups = self.initialize()
         
-
+    
     def initialize(self):
         train_groups = [[] for _ in range(self.batch_num)]
         
@@ -71,6 +71,7 @@ class Cifar100:
             test_data_g = test_data[1024:2048].reshape(32, 32)
             test_data_b = test_data[2048:].reshape(32, 32)
             test_data = np.dstack((test_data_r, test_data_g, test_data_b))
+            
             for i, (low, high) in enumerate(self.class_ranges):
                 if low <= test_label < high:
                     test_groups[i].append((test_data, test_label))

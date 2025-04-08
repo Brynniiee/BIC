@@ -44,17 +44,19 @@ class Exemplar:
 # modify to flexible class number, especially for new tasks with old classes
 # adapt to tasks with repepitition of old classes
     def update(self, cls_num, train, val):
+
         train_x, train_y = train
         val_x, val_y = val
 
         # 计算当前所有已存储的类别 + 新任务带来的类别
-        all_existing_classes = set(self.val.keys()) | set(val_y) | set(train_y)
+        all_existing_classes = set(self.val.keys()) | set(val_y) | set(train_y)      ##bug?
         self.cur_cls = len(all_existing_classes)  # 更新类别数
 
-        total_store_num = self.max_size / self.cur_cls if self.cur_cls != 0 else self.max_size
+        total_store_num = self.max_size / self.cur_cls if self.cur_cls != 0 else self.max_size 
         train_store_num = int(total_store_num * 0.9)
         val_store_num = int(total_store_num * 0.1)
 
+        
         # 先裁剪已有类别的样本
         for key in self.val:
             self.val[key] = self.val[key][:val_store_num]
@@ -76,8 +78,12 @@ class Exemplar:
                 self.train[y].append(x)
 
         # 确保所有类别的样本数量符合存储限制
+        print(f"Current classes: {self.cur_cls}, Train size: {len(self.train)}, Val size: {len(self.val)}")
+        print(f"len(self.val): {len(self.val)}, len(self.train): {len(self.train)}")
+        print(f"train classes = {set(train_y)} \n validation classes =  {set(val_y)} \n all classes = {all_existing_classes}\n current classes = {self.cur_cls}")
         assert len(self.val) == self.cur_cls
         assert len(self.train) == self.cur_cls
+        
 
 
     def get_exemplar_train(self):

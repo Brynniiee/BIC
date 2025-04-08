@@ -21,7 +21,7 @@ import pickle
 from dataset import BatchData
 from model import PreResNet, BiasLayer
 from cifar import Cifar100
-from subcifar_debug import SubCifar100
+from readpickle import GXWData
 from exemplar import Exemplar
 from copy import deepcopy
 
@@ -31,8 +31,8 @@ class Trainer:
         self.total_cls = init_cls                                                   ## changed total_cls to init_cls
         self.seen_cls = 0
         self.num_new_cls = []
-        self.dataset = Cifar100()  #for display
-        #self.dataset = SubCifar100() #for debug
+        self.dataset = GXWData()  
+        # self.dataset = Cifar100()  # 这里可以选择不同的数据集
         self.model = PreResNet(47,init_cls).cuda()        # formerly 32 for basicblock                          
         print(self.model)
         #self.model = nn.DataParallel(self.model, device_ids=[0,1])
@@ -50,15 +50,29 @@ class Trainer:
         # self.bias_layer = BiasLayer().cuda()  # 仅建立一个 BiasLayer，作用于所有旧类别
         # self.bias_layers = [self.bias_layer]  # 仅建立一个 BiasLayer，作用于所有旧类别
 
-        self.input_transform= Compose([
-                                transforms.RandomHorizontalFlip(),
-                                transforms.RandomCrop(32,padding=4),
-                                ToTensor(),
-                                Normalize([0.5071,0.4866,0.4409],[0.2673,0.2564,0.2762])])
+        # self.input_transform= Compose([
+        #                         transforms.RandomHorizontalFlip(),
+        #                         transforms.RandomCrop(32,padding=4),
+        #                         ToTensor(),
+        #                         Normalize([0.5071,0.4866,0.4409],[0.2673,0.2564,0.2762])])
+
+        # self.input_transform_eval= Compose([
+        #                         ToTensor(),
+        #                         Normalize([0.5071,0.4866,0.4409],[0.2673,0.2564,0.2762])])
+
+        self.input_transform = Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.Resize((875, 656)),  
+            ToTensor(),
+            Normalize([0.5071, 0.4866, 0.4409], [0.2673, 0.2564, 0.2762])
+        ])
 
         self.input_transform_eval= Compose([
-                                ToTensor(),
-                                Normalize([0.5071,0.4866,0.4409],[0.2673,0.2564,0.2762])])
+            ToTensor(),
+            Normalize([0.5071,0.4866,0.4409],[0.2673,0.2564,0.2762])
+            ])
+
+
         total_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         print("Solver total trainable parameters : ", total_params)
 
@@ -227,7 +241,7 @@ class Trainer:
                 bias_optimizer = optim.Adam([param for layer in self.bias_layers for param in layer.parameters()], lr=0.001)  #version2: train all the bias layers              
                 # bias_scheduler = StepLR(bias_optimizer, step_size=70, gamma=0.1)
             # exemplar.update(total_cls//dataset.batch_num, (train_x, train_y), (val_x, val_y))
-            exemplar.update(len(set(train_y) | set(val_y)), (train_x, train_y), (val_x, val_y)) 
+            exemplar.update(len(set(train_y) | set(val_y)), (train_x, train_y), (val_x, val_y))   ##bug?
             # modify to flexible class number, especially for new tasks with old classes
             # adapt to tasks with repepitition of old classes
             self.seen_cls = exemplar.get_cur_cls()
