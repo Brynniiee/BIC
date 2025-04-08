@@ -58,12 +58,16 @@ class MatDataLoader:
             else:
                 data = mat_contents[valid_keys[0]]  # 如果都没有，用第一个非系统字段
             
-            if isinstance(data, np.ndarray) and data.dtype != np.object_:
-                return data.astype(np.float32)
+            # 检查数据是否符合预期的尺寸 (15, 10240)
+            if isinstance(data, np.ndarray):
+                if data.shape == (15, 10240):
+                    return data.astype(np.float32)
+                else:
+                    print(f"[WARN] Invalid data shape {data.shape} in {file_path}, expected (15, 10240). Skipping this file.")
+                    return None
             else:
                 print(f"[WARN] Invalid or object type data in {file_path}")
                 return None
-
         except Exception as e:
-            print(f"[ERROR] Failed to load {file_path}: {e}")
+            print(f"[ERROR] Failed to load {file_path}: {str(e)}")
             return None

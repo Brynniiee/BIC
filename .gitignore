@@ -3,3 +3,4 @@ cifar-100-python
 __pycache__
 GXW_Data
 picklewithsplit.pkl
+model.pth

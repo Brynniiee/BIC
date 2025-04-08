@@ -7,7 +7,7 @@ from torchvision import transforms
 from loadmat import MatDataLoader
 
 class GXWData:
-    def __init__(self, batch_num=2, class_ranges=[(0, 3), (3, 4)]):
+    def __init__(self, batch_num=2, class_ranges=[(0, 3), (3, 5)]):
         loader = MatDataLoader(root_dir='GXW_Data/DASdata')
         self.train_data = loader.train_data
         self.train_labels = loader.train_labels

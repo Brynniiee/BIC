@@ -119,7 +119,8 @@ class Trainer:
 
     def test(self, testdata, inc_i):     # task number added for deciding whether to use bias correction
         print("test data number : ",len(testdata))   
-        self.model.eval()
+        with torch.no_grad():
+            self.model.eval()
         count = 0
         correct = 0
         wrong = 0
@@ -140,7 +141,8 @@ class Trainer:
 
 
     def eval(self, criterion, evaldata):
-        self.model.eval()
+        with torch.no_grad():
+            self.model.eval()
         losses = []
         correct = 0
         wrong = 0
@@ -247,7 +249,7 @@ class Trainer:
             print("seen cls number : ", self.seen_cls)
             val_xs, val_ys = exemplar.get_exemplar_val()
             val_bias_data = DataLoader(BatchData(val_xs, val_ys, self.input_transform),
-                        batch_size=100, shuffle=True, drop_last=False)
+                        batch_size=batch_size, shuffle=True, drop_last=False)    
             test_acc = []
             test_acc_noBiC = []
 
@@ -260,7 +262,9 @@ class Trainer:
                 print("Current Learning Rate : ", cur_lr)
                 self.model.train()
                 for _ in range(len(self.bias_layers)):
-                    self.bias_layers[_].eval()
+                    with torch.no_grad():
+                        self.bias_layers[_].eval()
+                    #self.bias_layers[_].eval()
                 if inc_i > 0:
                     self.stage1_distill(train_data, criterion, optimizer, num_new_cls)
                 else:
@@ -271,7 +275,8 @@ class Trainer:
             if inc_i > 0:
                 for epoch in range(3*epoches):
                     # bias_scheduler.step()
-                    self.model.eval()
+                    with torch.no_grad():
+                        self.model.eval()
                     for _ in range(len(self.bias_layers)):
                         self.bias_layers[_].train()
                     self.stage2(val_bias_data, criterion, bias_optimizer)
@@ -441,7 +446,7 @@ class Trainer:
     def stage2(self, val_bias_data, criterion, optimizer):
         print("Evaluating ... ")
         losses = []
-        for i, (image, label) in enumerate(tqdm(val_bias_data)):
+        for i, (image, label) in enumerate(tqdm(val_bias_data,leave = False)):
             image = image.cuda()
             label = label.view(-1).cuda()
             p = self.model(image)
