@@ -4,33 +4,16 @@ import random
 import numpy as np
 from PIL import Image
 from torchvision import transforms
+from loadmat import MatDataLoader
 
 class GXWData:
-    def __init__(self, path='picklewithsplit.pkl', batch_num=2, class_ranges=[(0, 3), (3, 4)]):
-        with open('picklewithsplit.pkl', 'rb') as f:
-            class_to_idx = pickle.load(f)['class_to_idx']
-
-
-
-            self.train_data = []
-            self.train_labels = []
-            self.test_data = []
-            self.test_labels = []
-
-
-
-            while True:
-                try:
-                    section, data, label = pickle.load(f)
-                    if section == 'train':
-                        self.train_data.append(data)
-                        self.train_labels.append(label)
-                    elif section == 'test':
-                        self.test_data.append(data)
-                        self.test_labels.append(label)
-                except EOFError:
-                    break  
-
+    def __init__(self, batch_num=2, class_ranges=[(0, 3), (3, 4)]):
+        loader = MatDataLoader(root_dir='GXW_Data/DASdata')
+        self.train_data = loader.train_data
+        self.train_labels = loader.train_labels
+        self.test_data = loader.test_data
+        self.test_labels = loader.test_labels
+        self.class_to_idx = loader.class_to_idx
 
         self.batch_num = batch_num
         self.class_ranges = class_ranges
@@ -42,11 +25,6 @@ class GXWData:
         test_groups = [[] for _ in range(self.batch_num)]
 
         for train_data, label in zip(self.train_data, self.train_labels):
-            
-            train_data_r = train_data[:(875*656)].reshape(875, 656)
-            train_data_g = train_data[(875*656):2*(875*656)].reshape(875, 656)
-            train_data_b = train_data[2*(875*656):].reshape(875, 656)
-            train_data = np.dstack((train_data_r, train_data_g, train_data_b))
 
             for i, (low, high) in enumerate(self.class_ranges):
                 
@@ -63,15 +41,11 @@ class GXWData:
             train_groups[i] = train_groups[i][:n]
 
         for test_data, label in zip(self.test_data, self.test_labels):
-            test_data_r = test_data[:(875*656)].reshape(875, 656)
-            test_data_g = test_data[(875*656):2*(875*656)].reshape(875, 656)
-            test_data_b = test_data[2*(875*656):].reshape(875, 656)
-            test_data = np.dstack((test_data_r, test_data_g, test_data_b))
+
             for i, (low, high) in enumerate(self.class_ranges):
                 if low <= label < high:
                     test_groups[i].append((test_data, label))
-        print("训练集唯一标签:", set(self.train_labels))
-        print("测试集唯一标签:", set(self.test_labels))
+
         return train_groups, val_groups, test_groups
 
     def getNextClasses(self, i):
@@ -82,3 +56,9 @@ class GXWData:
 if __name__ == "__main__":
     GXW_data = GXWData()
     print(len(GXW_data.train_groups[0]))
+
+if __name__ == "__main__":
+    loader = MatDataLoader("GXW_Data/DASdata")
+    print(f"Loaded {len(loader.train_data)} training samples.")
+    print(f"Loaded {len(loader.test_data)} testing samples.")
+    print(f"Sample shape: {loader.train_data[0].shape}, dtype: {loader.train_data[0].dtype}")
