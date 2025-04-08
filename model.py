@@ -106,7 +106,7 @@ class PreResNet(nn.Module):
             raise ValueError('block_name shoule be Basicblock or Bottleneck')
 
         self.inplanes = 16
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1,
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=3, padding=1,
                                bias=False)
         self.layer1 = self._make_layer(block, 16, n)
         self.layer2 = self._make_layer(block, 32, n, stride=2)

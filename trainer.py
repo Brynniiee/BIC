@@ -62,15 +62,14 @@ class Trainer:
 
         self.input_transform = Compose([
             transforms.RandomHorizontalFlip(),
-            transforms.Resize((875, 656)),  
-            ToTensor(),
-            Normalize([0.5071, 0.4866, 0.4409], [0.2673, 0.2564, 0.2762])
+            transforms.ToTensor(), 
+            transforms.Normalize([0.5],[0.2]),  
         ])
 
-        self.input_transform_eval= Compose([
-            ToTensor(),
-            Normalize([0.5071,0.4866,0.4409],[0.2673,0.2564,0.2762])
-            ])
+        self.input_transform_eval = Compose([
+            transforms.ToTensor(),
+            transforms.Normalize([0.5],[0.2]),
+        ])
 
 
         total_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
