@@ -232,14 +232,18 @@ class Trainer:
                         batch_size=batch_size, shuffle=False)
             test_data = DataLoader(BatchData(test_xs, test_ys, self.input_transform_eval),
                         batch_size=batch_size, shuffle=False)
-            optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
-            # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
-            scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
+            if inc_i == 0:
+                optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
+                # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
+                scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
 
             if inc_i > 0:               # Biaslayer trained only if there is bias correction
                 # bias_optimizer = optim.SGD(self.bias_layers[inc_i].parameters(), lr=lr, momentum=0.9)
                 # bias_optimizer = optim.Adam(self.bias_layers[-1].parameters(), lr=0.001) #version 1: only train the last bias layer #inc-1 -> -1
-                bias_optimizer = optim.Adam([param for layer in self.bias_layers for param in layer.parameters()], lr=0.001)  #version2: train all the bias layers              
+                optimizer = optim.SGD(self.model.parameters(), lr=lr*10, momentum=0.9,  weight_decay=2e-4)
+                # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
+                scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
+                bias_optimizer = optim.Adam([param for layer in self.bias_layers for param in layer.parameters()], lr=0.01)  #version2: train all the bias layers              
                 # bias_scheduler = StepLR(bias_optimizer, step_size=70, gamma=0.1)
             # exemplar.update(total_cls//dataset.batch_num, (train_x, train_y), (val_x, val_y))
             exemplar.update(len(set(train_y) | set(val_y)), (train_x, train_y), (val_x, val_y))   ##bug?
@@ -398,15 +402,18 @@ class Trainer:
     def stage1_initial(self, train_data, criterion, optimizer):
         print("Training ... ")
         losses = []
+        optimizer.zero_grad()
         for i, (image, label) in enumerate(tqdm(train_data)):
             image = image.cuda()
             label = label.view(-1).cuda()
             p = self.model(image)
             # p = self.bias_forward(p)    #no meed for bias_forward in initial training
             loss = criterion(p[:,:self.seen_cls], label)
-            optimizer.zero_grad()
+            # optimizer.zero_grad()
             loss.backward(retain_graph=True)
-            optimizer.step()
+            if (i + 1) % 10 == 0:
+                optimizer.step()
+                optimizer.zero_grad()
             losses.append(loss.item())
         print("stage1 loss :", np.mean(losses))
 
@@ -414,7 +421,7 @@ class Trainer:
         print("Training ... ")
         distill_losses = []
         ce_losses = []
-        T = 2
+        T = 4
         #alpha = (self.seen_cls - 20)/ self.seen_cls
                 #alpha = (self.seen_cls - (self.total_cls // self.dataset.batch_num)) / self.seen_cls
                 # modify to flexible class number 
@@ -422,6 +429,7 @@ class Trainer:
         alpha = (self.seen_cls - self.num_new_cls[-1]) / (self.seen_cls) 
 #########################################################################################################################################        
         print("classification proportion 1-alpha = ", 1-alpha)
+        optimizer.zero_grad()
         for i, (image, label) in enumerate(tqdm(train_data)):
             image = image.cuda()
             label = label.view(-1).cuda()
@@ -435,9 +443,12 @@ class Trainer:
             loss_soft_target = -torch.mean(torch.sum(pre_p * logp, dim=1))
             loss_hard_target = nn.CrossEntropyLoss()(p[:,:self.seen_cls], label)
             loss = loss_soft_target * T * T + (1-alpha) * loss_hard_target
-            optimizer.zero_grad()
+
             loss.backward(retain_graph=True)
-            optimizer.step()
+            if (i + 1) % 10 == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                
             distill_losses.append(loss_soft_target.item())
             ce_losses.append(loss_hard_target.item())
         print("stage1 distill loss :", np.mean(distill_losses), "ce loss :", np.mean(ce_losses))
