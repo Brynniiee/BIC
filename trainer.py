@@ -37,7 +37,8 @@ class Trainer:
         print(self.model)
         #self.model = nn.DataParallel(self.model, device_ids=[0,1])
         self.model = self.model.cuda()  # 将模型移动到 GPU 0
-
+        self.lossdecay = []
+        self.valacc    = []
         # 动态增加 bias layer 以适应增量训练的未知新任务
         # self.bias_layer1 = BiasLayer().cuda()
         # self.bias_layer2 = BiasLayer().cuda()
@@ -89,7 +90,8 @@ class Trainer:
                 new_state_dict[name] = param
 
         self.model.load_state_dict(new_state_dict)  # 应用参数更新
-        self.seen_cls += new_cls  # 这里修正 seen_cls，避免 bias_forward 出错 
+        self.seen_cls += new_cls  # seen_cls 更新  
+
 
         # if self.model is None:
         #     self.model = PreResNet(32, self.total_cls).cuda()  # 第一次初始化
@@ -158,6 +160,7 @@ class Trainer:
             wrong += sum(pred != label).item()
         print("Validation Loss: {}".format(np.mean(losses)))
         print("Validation Acc: {}".format(100*correct/(correct+wrong)))
+        self.valacc.append(100*correct/(correct+wrong))
         self.model.train()
         return
 
@@ -175,8 +178,11 @@ class Trainer:
         dataset = self.dataset
         test_xs, test_ys, train_xs, train_ys = [], [], [], []
 
+        test_acc_noBiC = []
+        test_acc = []
         test_accs = []
         test_accs_noBiC = []
+
         for inc_i in range(dataset.batch_num):
             print(f"Incremental num: {inc_i}")
             bias_layer = BiasLayer().cuda()
@@ -254,8 +260,9 @@ class Trainer:
             val_xs, val_ys = exemplar.get_exemplar_val()
             val_bias_data = DataLoader(BatchData(val_xs, val_ys, self.input_transform),
                         batch_size=batch_size, shuffle=True, drop_last=False)    
-            test_acc = []
-            test_acc_noBiC = []
+
+            test_acc.append([])
+            test_acc_noBiC.append([])            
 
             for epoch in range(epoches):
                 print("---"*50)
@@ -274,8 +281,9 @@ class Trainer:
                 else:
                     self.stage1_initial(train_data, criterion, optimizer)
                 acc = self.test(test_data, inc_i)
-            test_acc_noBiC.append(acc)
-            test_accs_noBiC.append(max(test_acc_noBiC))
+                test_acc_noBiC[-1].append(acc)
+            test_accs_noBiC.append(max(test_acc_noBiC[-1]))
+
             if inc_i > 0:
                 for epoch in range(3*epoches):
                     # bias_scheduler.step()
@@ -286,18 +294,57 @@ class Trainer:
                     self.stage2(val_bias_data, criterion, bias_optimizer)
                     if epoch % 50 == 0:
                         acc = self.test(test_data, inc_i)
-                        test_acc.append(acc)
+                        test_acc[-1].append(acc)
             for i, layer in enumerate(self.bias_layers):
                 layer.printParam(i)
             self.previous_model = deepcopy(self.model)
             acc = self.test(test_data, inc_i)
-            test_acc.append(acc)
-            test_accs.append(max(test_acc))
+            test_acc[-1].append(acc)
+            test_accs.append(max(test_acc[-1]))
             print("Test results on testset of model without BiC",test_accs_noBiC)
             print("Test results on testset after BiC training",test_accs)
-            #print("This is the result for training only the last bias layer")
-            print("This is the result for training all the bias layers")
-            
+    
+        print("number of new classes seen in each task : ", self.num_new_cls)
+        
+        #save model
+        torch.save(self.model.state_dict(), 'model.pth')
+        
+        # stage1 test accuracy 可视化
+        save_dir = "output"
+        os.makedirs(save_dir, exist_ok=True)  
+
+
+        plt.figure(figsize=(10, 6))  
+
+        for i in range(len(test_acc_noBiC)):
+            epochs = range(len(test_acc_noBiC[i]))
+            plt.plot(epochs, test_acc_noBiC[i], label=f"Task {i}")  
+
+        plt.xlabel("Epochs")
+        plt.ylabel("Accuracy")
+        plt.title("Accuracy Changes Over Epochs for Each Incremental Task in stage 1")
+        plt.legend()  
+        plt.grid(True)  
+
+        save_path = os.path.join(save_dir, "Stage1_accuracy_plot.png")
+        plt.savefig(save_path, dpi=300, bbox_inches='tight') 
+        print(f"Plot saved at: {save_path}")
+
+        # stage2 test accuracy 可视化
+        plt.figure(figsize=(10, 6))  
+
+        for i in range(len(test_acc)):
+            epochs = range(len(test_acc[i]))
+            plt.plot(epochs, test_acc[i], label=f"Task {i}")  
+
+        plt.xlabel("Epochs")
+        plt.ylabel("Accuracy")
+        plt.title("Accuracy Changes Over Epochs for Each Incremental Task in stage 2")
+        plt.legend()  
+        plt.grid(True)  
+        save_path = os.path.join(save_dir, "Stage2_accuracy_plot.png")
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved at: {save_path}")
 
 
     # def bias_forward(self, input):  #V1
