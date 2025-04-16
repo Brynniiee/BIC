@@ -113,7 +113,8 @@ class PreResNet(nn.Module):
         self.layer3 = self._make_layer(block, 64, n, stride=2)
         self.bn = nn.BatchNorm2d(64 * block.expansion)
         self.relu = nn.ReLU(inplace=True)
-        self.avgpool = nn.AvgPool2d(8)
+        #self.avgpool = nn.AvgPool2d(8)
+        self.avgpool = nn.AdaptiveAvgPool2d((1,1))  #只在W方向上做池化，因为数据是15*10240 
         self.fc = nn.Linear(64 * block.expansion, num_classes)
 
         for m in self.modules():

@@ -26,6 +26,7 @@ class MatDataLoader:
             all_files = [os.path.join(cls_dir, f) for f in files if f.endswith('.mat')]
 
             split_idx = int(0.8 * len(all_files))
+            #all_files 是不对的，应当分开文件夹然后再取，否则将会导致test集中没有少样本数的类别
             train_files = all_files[:split_idx]
             test_files = all_files[split_idx:]
 
@@ -58,12 +59,26 @@ class MatDataLoader:
             else:
                 data = mat_contents[valid_keys[0]]  # 如果都没有，用第一个非系统字段
             
-            if isinstance(data, np.ndarray) and data.dtype != np.object_:
-                return data.astype(np.float32)
-            else:
-                print(f"[WARN] Invalid or object type data in {file_path}")
-                return None
+            valid_data = 0
+            # 检查数据是否符合预期尺寸 (15, 10240)
+            if isinstance(data, np.ndarray):
 
+                if data.shape == (15, 10240):
+                    valid_data +=1
+                    return data.astype(np.float32)
+                    
+                elif data.shape[1] >= 10240 and data.shape[0] >= 15:
+                    print(f"[INFO] Data shape {data.shape} in {file_path} is larger than expected, trimming to (15, 10240).")
+                    data = data[:15, :10240]
+                    valid_data +=1
+                    return data.astype(np.float32)
+                
+                else:    
+                    # print(f"[WARN] Invalid data shape {data.shape} in {file_path}, expected (15, 10240). Skipping this file.")
+                    return None
+            else:
+                # print(f"[WARN] Invalid or object type data in {file_path}")
+                return None
         except Exception as e:
-            print(f"[ERROR] Failed to load {file_path}: {e}")
+            print(f"[ERROR] Failed to load {file_path}: {str(e)}")
             return None
