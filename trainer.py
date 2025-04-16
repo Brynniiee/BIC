@@ -533,7 +533,7 @@ class Trainer:
         print("Training ... ")
         distill_losses = []
         ce_losses = []
-        T = 2
+        T = 4
         #alpha = (self.seen_cls - 20)/ self.seen_cls
                 #alpha = (self.seen_cls - (self.total_cls // self.dataset.batch_num)) / self.seen_cls
                 # modify to flexible class number 

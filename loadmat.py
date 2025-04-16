@@ -68,7 +68,7 @@ class MatDataLoader:
                     return data.astype(np.float32)
                     
                 elif data.shape[1] >= 10240 and data.shape[0] >= 15:
-                    print(f"[INFO] Data shape {data.shape} in {file_path} is larger than expected, trimming to (15, 10240).")
+                    # print(f"[INFO] Data shape {data.shape} in {file_path} is larger than expected, trimming to (15, 10240).")
                     data = data[:15, :10240]
                     valid_data +=1
                     return data.astype(np.float32)
