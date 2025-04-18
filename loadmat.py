@@ -3,14 +3,17 @@ import scipy.io
 import numpy as np
 from tqdm import tqdm
 
+
 class MatDataLoader:
     def __init__(self, root_dir):
         self.root_dir = root_dir
         self.class_to_idx = {}
-        self.train_data = []
-        self.train_labels = []
-        self.test_data = []
-        self.test_labels = []
+        # self.train_data = []
+        # self.train_labels = []
+        # self.test_data = []
+        # self.test_labels = []
+        self.all_data = []
+        self.all_labels = []
 
         self.load_data()
 
@@ -27,20 +30,27 @@ class MatDataLoader:
 
             split_idx = int(0.8 * len(all_files))
             #all_files 是不对的，应当分开文件夹然后再取，否则将会导致test集中没有少样本数的类别
-            train_files = all_files[:split_idx]
-            test_files = all_files[split_idx:]
+            #另一种可能更容易的方案是先做数据增强再进行traintest划分
+            # train_files = all_files[:split_idx]
+            # test_files = all_files[split_idx:]
 
-            for fpath in tqdm(train_files, desc=f'  {cls_name}', leave=False):
+            # for fpath in tqdm(train_files, desc=f'  {cls_name}', leave=False):
+            #     data = self.load_mat_file(fpath)
+            #     if data is not None:
+            #         self.train_data.append(data)
+            #         self.train_labels.append(self.class_to_idx[cls_name])
+
+            # for fpath in tqdm(test_files, desc=f'  {cls_name}', leave=False):
+            #     data = self.load_mat_file(fpath)
+            #     if data is not None:
+            #         self.test_data.append(data)
+            #         self.test_labels.append(self.class_to_idx[cls_name])
+
+            for fpath in tqdm(all_files, desc=f'  {cls_name}', leave=False):
                 data = self.load_mat_file(fpath)
                 if data is not None:
-                    self.train_data.append(data)
-                    self.train_labels.append(self.class_to_idx[cls_name])
-
-            for fpath in tqdm(test_files, desc=f'  {cls_name}', leave=False):
-                data = self.load_mat_file(fpath)
-                if data is not None:
-                    self.test_data.append(data)
-                    self.test_labels.append(self.class_to_idx[cls_name])
+                    self.all_data.append(data)
+                    self.all_labels.append(self.class_to_idx[cls_name])
 
     def load_mat_file(self, file_path):
         try:
