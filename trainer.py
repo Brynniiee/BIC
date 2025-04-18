@@ -145,7 +145,7 @@ class Trainer:
         for param_group in optimizer.param_groups:
             return param_group['lr']
 
-    def train(self, batch_size, epoches, lr, max_size):
+    def train(self, batch_size, epoches, lr, bias_lr, max_size, T = 4):
         total_cls = self.total_cls
         criterion = nn.CrossEntropyLoss()
         exemplar = Exemplar(max_size, total_cls)
@@ -244,7 +244,7 @@ class Trainer:
                 optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
                 # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
                 scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
-                bias_optimizer = optim.Adam([param for layer in self.bias_layers for param in layer.parameters()], lr=0.1)  #version2: train all the bias layers              
+                bias_optimizer = optim.Adam([param for layer in self.bias_layers for param in layer.parameters()], lr=bias_lr)  #version2: train all the bias layers              
                 # bias_scheduler = StepLR(bias_optimizer, step_size=70, gamma=0.1)
             # exemplar.update(total_cls//dataset.batch_num, (train_x, train_y), (val_x, val_y))
             exemplar.update(len(set(train_y) | set(val_y)), (train_x, train_y), (val_x, val_y))   ##bug?
@@ -275,7 +275,7 @@ class Trainer:
                         self.bias_layers[_].eval()
                     #self.bias_layers[_].eval()
                 if inc_i > 0:
-                    self.stage1_distill(train_data, criterion, optimizer, num_new_cls)
+                    self.stage1_distill(train_data, criterion, optimizer, num_new_cls, T = T)
                 else:
                     self.stage1_initial(train_data, criterion, optimizer)
                 acc = self.validation(eval_data, inc_i)
@@ -308,14 +308,17 @@ class Trainer:
             print("Test results on testset after BiC training",test_accs)
     
         print("number of new classes seen in each task : ", self.num_new_cls)
-        
+        print(f'initial learning rate: {lr}')
+        print(f'Bias layer learning rate: {bias_lr}')
+        print(f'epoches: {epoches}')
+        print(f'Distillation temperature: {T}')
         #save model
         torch.save(self.model.state_dict(), 'model.pth')
         self.trainer_visual(val_acc_noBiC, val_acc, test_accs, test_accs_noBiC, test_acc_in_training_process)
 
         
     def trainer_visual(self, val_acc_noBiC, val_acc, test_accs, test_accs_noBiC, test_acc_in_training_process):
-        # stage1 validation accuracy 可视化
+        # stage1 validation accuracy visualization
         save_dir = "output"
         os.makedirs(save_dir, exist_ok=True)  
 
@@ -353,7 +356,7 @@ class Trainer:
         print(f"Plot saved at: {save_path}")
 
         plt.figure(figsize=(10, 6))
-        # task accuracy decay 可视化
+        # task accuracy decay visualization
         for i in range(len(test_accs_noBiC)):
             tasks = range(len(test_accs_noBiC))
             plt.plot(tasks, test_accs_noBiC, label=f"Task {i}", color='orange')
@@ -504,11 +507,10 @@ class Trainer:
             losses.append(loss.item())
         print("stage1 loss :", np.mean(losses))
 
-    def stage1_distill(self, train_data, criterion, optimizer, num_new_cls):
+    def stage1_distill(self, train_data, criterion, optimizer, num_new_cls, T=4):
         print("Training ... ")
         distill_losses = []
         ce_losses = []
-        T = 4
         #alpha = (self.seen_cls - 20)/ self.seen_cls
                 #alpha = (self.seen_cls - (self.total_cls // self.dataset.batch_num)) / self.seen_cls
                 # modify to flexible class number 
