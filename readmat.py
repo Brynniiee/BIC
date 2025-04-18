@@ -17,7 +17,6 @@ class GXWData:
         '''
         self.rootdir = 'GXW_Data/DASdata'
         loader = MatDataLoader(self.rootdir)   
-        # 出现了testdata中几乎没有少数类的情况，需在loadmat中平均化，才能保证后续的数据增强取得稳定效果
         self.train_data = []
         self.train_labels = []
         self.test_data = []
@@ -35,10 +34,11 @@ class GXWData:
     def initialize(self):
         '''
         following steps included:
-            1. transfer data from labels & data to list; [(label, data), ...]
+            1. transfer data from labels & data to list; [(data, label), ...]
             3. data augmentation to balance sample number for each class
             4. split data into train, val and test groups
-            5. for counting samples in each class, group data by label
+            5. group data by tasks
+            6. for counting samples in each class, group data by label
         Returns:
             train_groups: type为list,[(data,label),...]
             val_groups
@@ -60,13 +60,13 @@ class GXWData:
         augmented_set = self.balance_with_augmentation(all_data_by_label)
         for augmented_sample in augmented_set:
             for j, class_range in enumerate(self.class_ranges):
-                if augmented_sample[1] in class_range:  # augmented_sample[1] 是标签
+                if augmented_sample[1] in class_range:  
                     groups[j].append(augmented_sample)
-                    break  # 一旦找到对应的 class_range，就可以停止查找
+                    break  
         all_data_by_label = self.group_data_by_label(groups)
         print(f"Samples after augmentation:", {k: len(v) for k, v in all_data_by_label.items()})
         train_groups, val_groups, test_groups = self.train_val_test_split(data = groups, val_train_split=self.val_train_split, test_train_split = self.test_train_split, batch_num=self.batch_num)
-        # 统计每类样本数量
+        # counting samples in each class, group data by label
         train_data_by_label = self.group_data_by_label(train_groups)
         val_data_by_label = self.group_data_by_label(val_groups)
         test_data_by_label = self.group_data_by_label(test_groups)
@@ -77,16 +77,16 @@ class GXWData:
 
 
     def train_val_test_split(self, data = [], val_train_split = 0.2, test_train_split=0.2, batch_num = 1):
-        """ 划分数据集为训练集、验证集和测试集
+        """ split data first into train+val & test sets and then split train+val set into train & val sets
         Args:
-            data: type 为 dict
-            val_train_split: 验证集的比例
-            test_train_split: 测试集的比例
-            train_groups: 待加入样本的空训练集
-            val_groups: 待加入样本的空验证集
-            test_groups: 待加入样本的空测试集
+            data: type = list,[(data,label),...]
+            val_train_split: val proportion in train+val set
+            test_train_split: test proportion in total set 
+            train_groups: empty training set awaiting to be filled
+            val_groups 
+            test_groups
         Returns:
-            train_groups: type为list,[(data,label),...]
+            train_groups: type = list,[(data,label),...]
             val_groups
             test_groups
         """
@@ -94,13 +94,13 @@ class GXWData:
         val_groups = [[] for _ in range(batch_num)]
         test_groups = [[] for _ in range(batch_num)]
         for task_id, data_group in enumerate(data):  # data_group is a list of (data, label)
-            # 分离数据和标签
+            # split data and label
             print(len(data_group))
             X = [x for x, y in data_group]
             y = [y for x, y in data_group]
-            # 先划分 train_val 和 test
+            # train_val & test split
             X_trainval, X_test, y_trainval, y_test = train_test_split(X, y, test_size=test_train_split, stratify=y, random_state=42)
-            # 再划分 train 和 val
+            # train & val split
             X_train, X_val, y_train, y_val = train_test_split(X_trainval, y_trainval, test_size=val_train_split, stratify=y_trainval, random_state=42)
 
             train_groups[task_id].extend(list(zip(X_train, y_train)))
@@ -132,7 +132,7 @@ class GXWData:
         Returns:
             label_groups: type = dict, {label: [data1, data2, ...]}
         '''
-        all_data = sum(data, [])  # 展平数据
+        all_data = sum(data, [])  ## 展平数据
         label_groups = {}
         for sample, label in all_data:
             if label not in label_groups:
@@ -141,11 +141,12 @@ class GXWData:
         return label_groups
     
     def balance_with_augmentation(self, data_by_label):
-        """按照不同类别的样本数目进行样本增强，使得每个类别的样本总数接近原本总样本数最多的类别
+        """Augmentation to balance the number of samples in each class,
+        sothat the number of samples in each class is greater than 1/2 samples in the largest class
         Args:
-            data_by_label: 按照标签分组的数据
+            data_by_label: data grouped by label, type = dict, {label: [data1, data2, ...]}
         Returns:
-            augmented_data: 增强后的数据，type为list,[(label,data),...] 
+            augmented_data: type = list,[(data,label),...] 
         """
         all_labels = data_by_label.keys()
         class_counts = {k: len(v) for k, v in data_by_label.items()}
@@ -155,7 +156,7 @@ class GXWData:
         for label, samples in tqdm(data_by_label.items(), desc="Balancing classes", leave=True):
             current_count = len(samples)
             if current_count <= max_count // 2:
-                # 如果类别数量过少,按倍数进行增强，使有效样本数大于最大类别数一半
+                # if too few samples, augment the data to more than half of the largest class
                 augmentation_factor = max_count // current_count - 1
                 if augmentation_factor > 0:
                     for s in tqdm(samples, desc=f"Augmenting {label}", leave=False):
@@ -164,24 +165,25 @@ class GXWData:
         return augmented_data
 
 
-    def sample_augmentation(self, sample, augmentation_factor):
-        """生成增强样本，对每个样本返回augmentation_factor个增强版本，输出类型为list, [(label, data), ...]
+    def sample_augmentation(self, sample_data, augmentation_factor):
+        """generate augmented samples for data of each sample, 
+        return #augmentation_factor augmented samples for each original sample
         Args:
-            sample: 输入样本
-            augmentation_factor: 增强样本数倍数
+            sample: data of a sample, type = np.ndarray, (15, 10240)
+            augmentation_factor: mutiplicative factor
         Returns:
-            augmented: 增强后的样本列表
+            augmented: type = list, [(15, 10240), ...]
         """
         augmented = []
-        for _ in range(augmentation_factor):  # 生成 A 个增强数据
-            s = sample.copy()
-            # 加入高斯噪声
+        for _ in range(augmentation_factor):  # generate augmentation_factor samples 
+            s = sample_data.copy()
+            # introduce gaussian noise
             noise = np.random.normal(0, 0.01 * np.std(s), s.shape)
             s_noisy = s + noise
-            # 缩放（模拟信号幅度变化）
+            # randomly scale
             scale = np.random.uniform(0.9, 1.1)
             s_scaled = s_noisy * scale
-            # 微移（时间轴方向）
+            # randomly shift
             target_len = 10240
             shift = np.random.randint(-20, 20)
             if shift >= 0:

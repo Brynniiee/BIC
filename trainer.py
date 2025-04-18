@@ -78,42 +78,17 @@ class Trainer:
 
 
     def expand_model(self, new_cls):
-        # 记录原始模型参数
         old_state_dict = self.model.state_dict()
-        # 创建新的模型，但仅修改 fc 层
-        self.model = PreResNet(47, self.total_cls + new_cls).cuda()     # formerly 32 for basicblock
+        # define new model with expanded fc layer
+        self.model = PreResNet(47, self.total_cls + new_cls).cuda()     
         new_state_dict = self.model.state_dict()
 
-        # 载入原有模型的参数（除 fc 层外）
         for name, param in old_state_dict.items():
-            if "fc" not in name:  # 只更新非 fc 层的参数
+            if "fc" not in name:  # remain old params in other layers
                 new_state_dict[name] = param
 
-        self.model.load_state_dict(new_state_dict)  # 应用参数更新
-        self.seen_cls += new_cls  # seen_cls 更新  
-
-
-        # if self.model is None:
-        #     self.model = PreResNet(32, self.total_cls).cuda()  # 第一次初始化
-        # else:
-            # # 备份旧模型
-            # old_model = self.model
-            # old_fc_weights = old_model.fc.weight.data
-            # old_fc_bias = old_model.fc.bias.data if old_model.fc.bias is not None else None
-            
-            # # 重新初始化模型
-            # self.model = PreResNet(32, self.total_cls).cuda()
-
-            # # 复制旧参数
-            # with torch.no_grad():
-            #     self.model.fc.weight[:old_fc_weights.shape[0], :] = old_fc_weights
-            #     if old_fc_bias is not None:
-            #         self.model.fc.bias[:old_fc_bias.shape[0]] = old_fc_bias
-            
-            #         # 记录原始模型参数
-            # old_state_dict = self.model.state_dict()
-
-            # 创建新的模型，但仅修改 fc 层
+        self.model.load_state_dict(new_state_dict)  # 
+        self.seen_cls += new_cls  # update seen_cls  
 
     
     def test(self, testdata, inc_i, heatmap_name):  # used in phased test, producing heatmap
@@ -210,7 +185,7 @@ class Trainer:
             self.num_new_cls.append(num_new_cls)
             print(f"New classes detected: {num_new_cls}")
             print(f"New classes for former tasks: {self.num_new_cls}")
-            #总类别数
+            #总类别数 update
             self.total_cls += num_new_cls
 
             if num_new_cls > 0:
@@ -226,7 +201,7 @@ class Trainer:
             val_class_count = self.count_class_samples(val)
             test_class_count = self.count_class_samples(test)
 
-            # 输出每个类别的有效样本数
+            # valid sample number for each class
             print("Training samples count:")
             for cls, count in train_class_count.items():
                 print(f"Class {cls}: {count} samples")
@@ -362,7 +337,7 @@ class Trainer:
         plt.savefig(save_path, dpi=300, bbox_inches='tight') 
         print(f"Plot saved at: {save_path}")
 
-        # stage2 test accuracy 可视化
+        # stage2 test accuracy visualization
         plt.figure(figsize=(10, 6))  
         for i in range(len(val_acc)):
             epochs = range(len(val_acc[i])) 
@@ -473,9 +448,9 @@ class Trainer:
     #     return out_list
 
     def bias_forward(self, input):
-        num_new_cls = self.num_new_cls  # 每个任务的新类别数
+        num_new_cls = self.num_new_cls  
         bias_layers = self.bias_layers  # 每个任务对应的 bias 层
-        out_list = []  # 存储每个任务经过 bias 处理后的输出
+        out_list = []  
         start = 0
 
         for i in range(len(bias_layers)):  
@@ -487,9 +462,9 @@ class Trainer:
         return torch.cat(out_list, dim=1)  # 拼接所有任务的输出
 
     # def bias_forward(self, input):
-    #     num_new_cls = self.num_new_cls  # 每个任务的新类别数
+    #     num_new_cls = self.num_new_cls  
     #     bias_layers = self.bias_layers  # 存储 Bias 层（不包含第一个任务）
-    #     out_list = []  # 存储经过 bias 处理后的输出
+    #     out_list = []  
     #     start = 0
 
     #     for i in range(len(num_new_cls)):  
@@ -498,7 +473,7 @@ class Trainer:
     #         out_list.append(bias_layers[i - 1](input[:, :prev_classes]))  # 作用于所有旧类别
     #         out_list.append(input[:, start:end])  # 直接添加当前任务的原始输出
 
-    #         start = end  # 更新起始索引
+    #         start = end  
 
     #     return torch.cat(out_list, dim=1)  
 
@@ -550,8 +525,8 @@ class Trainer:
             with torch.no_grad():
                 pre_p = self.previous_model(image)
                 pre_p = self.bias_forward(pre_p)
-                pre_p = F.softmax(pre_p[:,:self.seen_cls-num_new_cls]/T, dim=1)  # modified to flexible class number (-20 -> -num_new_cls)
-            logp = F.log_softmax(p[:,:self.seen_cls-num_new_cls]/T, dim=1)       # modified to flexible class number (-20 -> -num_new_cls) 
+                pre_p = F.softmax(pre_p[:,:self.seen_cls-num_new_cls]/T, dim=1)  
+            logp = F.log_softmax(p[:,:self.seen_cls-num_new_cls]/T, dim=1)       
             loss_soft_target = -torch.mean(torch.sum(pre_p * logp, dim=1))
             loss_hard_target = nn.CrossEntropyLoss()(p[:,:self.seen_cls], label)
             loss = loss_soft_target * T * T + (1-alpha) * loss_hard_target
