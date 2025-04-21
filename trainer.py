@@ -223,8 +223,10 @@ class Trainer:
             train_xs, train_ys = exemplar.get_exemplar_train()
             train_xs.extend(train_x)
             train_xs.extend(val_x)
+            ##############
             train_ys.extend(train_y)
             train_ys.extend(val_y)
+            ###############
 
 
             train_data = DataLoader(BatchData(train_xs, train_ys, self.input_transform),
@@ -234,14 +236,16 @@ class Trainer:
             test_data = DataLoader(BatchData(test_xs, test_ys, self.input_transform_eval),
                         batch_size=batch_size*10, shuffle=False)
             if inc_i == 0:
-                optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
+                # optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
+                optimizer = optim.Adam(self.model.parameters(), lr=lr) 
                 # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
                 scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
 
             if inc_i > 0:               # Biaslayer trained only if there is bias correction
                 # bias_optimizer = optim.SGD(self.bias_layers[inc_i].parameters(), lr=lr, momentum=0.9)
-                # bias_optimizer = optim.Adam(self.bias_layers[-1].parameters(), lr=0.001) #version 1: only train the last bias layer #inc-1 -> -1
-                optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
+                # bias_optimizer = optim.Adam(self.bias_layers[-1].parameters(), lr=0.001) 
+                # optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
+                optimizer = optim.Adam(self.model.parameters(), lr=lr)
                 # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
                 scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
                 bias_optimizer = optim.Adam([param for layer in self.bias_layers for param in layer.parameters()], lr=bias_lr)  #version2: train all the bias layers              
@@ -288,7 +292,7 @@ class Trainer:
             test_accs_noBiC.append(test_acc_noBic)
 
             if inc_i > 0:
-                for epoch in range(2*epoches):
+                for epoch in range(3*epoches):
                     # bias_scheduler.step()
                     with torch.no_grad():
                         self.model.eval()
