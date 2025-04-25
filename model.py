@@ -4,6 +4,8 @@ from torch import nn, autograd
 import torchvision.models as models
 from torch.nn import functional as F
 import utils
+from scipy.stats import weibull_min
+import numpy as np
 
 
 import torch.nn as nn
@@ -91,7 +93,7 @@ class Bottleneck(nn.Module):
 
 class PreResNet(nn.Module):
 
-    def __init__(self, depth, num_classes=1000, block_name='Bottleneck'):
+    def __init__(self, depth, num_classes=1000, block_name='BasicBlock'):
         super(PreResNet, self).__init__()
         # Model type specifies number of layers for CIFAR-10 model
         if block_name.lower() == 'basicblock':
@@ -114,7 +116,7 @@ class PreResNet(nn.Module):
         self.bn = nn.BatchNorm2d(64 * block.expansion)
         self.relu = nn.ReLU(inplace=True)
         #self.avgpool = nn.AvgPool2d(8)
-        self.avgpool = nn.AdaptiveAvgPool2d((1,1))  #只在W方向上做池化，因为数据是15*10240 
+        self.avgpool = nn.AdaptiveAvgPool2d((1,1))  #池化为 1，1
         self.fc = nn.Linear(64 * block.expansion, num_classes)
 
         for m in self.modules():
@@ -141,7 +143,7 @@ class PreResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         x = self.conv1(x)
 
         x = self.layer1(x)  # 32x32
@@ -151,10 +153,14 @@ class PreResNet(nn.Module):
         x = self.relu(x)
 
         x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
+        features = x.view(x.size(0), -1)    
+        logits = self.fc(features)  # [B, C]
 
-        return x
+        if return_features==True:
+            return logits, features
+        
+        return logits
+
 
 
 def preresnet(**kwargs):
@@ -173,3 +179,70 @@ class BiasLayer(nn.Module):
         return self.alpha * x + self.beta
     def printParam(self, i):
         print(f"in layer {i}, alpha = {self.alpha.item()}, beta = {self.beta.item()}")
+
+
+
+
+class EVTLayer(nn.Module):
+    def __init__(self, tail_size = 10):
+        super(EVTLayer, self).__init__()
+        self.tail_size = tail_size
+        self.class_params = {}
+
+    def compute_centroids(self, features, labels, num_classes):
+        """
+        features: tensor(样本数 x 特征维度) , 所有样本的特征
+        labels: tensor(样本数）
+        num_classes: seen 总类别数
+        返回: tensor(类别数 x 特征维度)，每个类别的中心向量
+        """
+        centroids = []
+        labels = labels.squeeze()
+        for cls in range(num_classes):
+            cls_feats = features[labels == cls,:]
+            centroid = cls_feats.mean(dim=0)
+            centroids.append(centroid)
+        return torch.stack(centroids)
+    
+    def fit_weibull(self, features, labels, centroids):
+        """
+        Args:
+            features: tensor(样本数 x 特征维度), 所有样本的特征
+            lebels: tensor(样本数）
+            centroids: tensor(类别数 x 特征维度), 每个类别的中心
+        """
+        features = features.cpu().numpy()
+        labels = labels.cpu().numpy()
+        centroids = centroids.cpu().numpy()
+        self.class_params = {}
+        labels = labels.squeeze()
+
+        for cls in np.unique(labels):
+            cls_features = features[labels == cls, :]
+            distances = np.linalg.norm(cls_features - centroids[cls], axis=1)  
+            # Euclidean distance of THIS SAMPLE to THE CLASS IT BELONGS TO in feature space
+            tail = np.sort(distances)[-self.tail_size:] 
+            shape, loc, scale = weibull_min.fit(tail, floc=0)
+            self.class_params[cls] = (shape, scale)
+    
+    def score(self, features, centroids):
+        """
+        Args:
+            features: tensor(样本数 x 特征维度), 要打分的样本特征
+            centroids: tensor(类别数 x 特征维度), 每个类别的中心
+        """
+        features = features.cpu().numpy()
+        centroids = centroids.cpu().numpy()
+        N = features.shape[0]
+        C = centroids.shape[0]
+        scores = np.zeros((N,C))
+        
+        for cls in range(C):
+            if cls not in self.class_params:
+                continue
+            else:
+                shape, scale = self.class_params[cls]
+                distances = np.linalg.norm(features - centroids[cls], axis=1)
+                prob = weibull_min.cdf(distances, shape, loc = 0, scale=scale)
+                scores[:, cls] = 1-prob
+        return torch.tensor(scores, device="cuda" ) 

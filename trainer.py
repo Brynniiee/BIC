@@ -24,6 +24,7 @@ from readmat import GXWData
 from exemplar import Exemplar
 from copy import deepcopy
 from sklearn.model_selection import train_test_split
+from model import EVTLayer
 
 
 class Trainer:
@@ -33,12 +34,13 @@ class Trainer:
         self.num_new_cls = []
         self.dataset = GXWData()  
         # self.dataset = Cifar100()  # 这里可以选择不同的数据集
-        self.model = PreResNet(47,init_cls).cuda()        # formerly 32 for basicblock                          
+        self.model = PreResNet(32,init_cls).cuda()        # 32 for basicblock   # 47 for bottleneck   
         print(self.model)
         #self.model = nn.DataParallel(self.model, device_ids=[0,1])
         self.model = self.model.cuda()  # 将模型移动到 GPU 0
         self.lossdecay = []
         self.valacc    = []
+        self.evt_threshold = 0.7
         # 动态增加 bias layer 以适应增量训练的未知新任务
         # self.bias_layer1 = BiasLayer().cuda()
         # self.bias_layer2 = BiasLayer().cuda()
@@ -80,7 +82,7 @@ class Trainer:
     def expand_model(self, new_cls):
         old_state_dict = self.model.state_dict()
         # define new model with expanded fc layer
-        self.model = PreResNet(47, self.total_cls + new_cls).cuda()     
+        self.model = PreResNet(32, self.total_cls + new_cls).cuda()     
         new_state_dict = self.model.state_dict()
 
         for name, param in old_state_dict.items():
@@ -91,67 +93,90 @@ class Trainer:
         self.seen_cls += new_cls  # update seen_cls  
 
     
-    def test(self, testdata, inc_i, heatmap_name):  # used in phased test, producing heatmap
-        print("test data number : ",len(testdata.dataset)) 
+    def test(self, testdata, inc_i, heatmap_name, use_evt=False, evt_layer=None, evt_threshold=0.7):
+        print("test data number : ", len(testdata.dataset)) 
         self.model.eval()  
         with torch.no_grad():
             correct = 0
             wrong = 0
-            pred_labels = torch.zeros((self.seen_cls, self.seen_cls), dtype=torch.int32)
+            unknown = 0
+
+            #include unknown class
+            pred_labels = torch.zeros((self.seen_cls + 1, self.seen_cls + 1), dtype=torch.int32)
+
             for i, (image, label) in enumerate(testdata):
                 image = image.cuda()
                 label = label.view(-1).cuda()
-                p = self.model(image)
-                if inc_i > 0:   # if there is bias correction
-                    p = self.bias_forward(p)
-                pred = p[:,:self.seen_cls].argmax(dim=-1)
+
+                logits, features = self.model(image, return_features=True)
+
+                if inc_i > 0:
+                    logits = self.bias_forward(logits)
+
+                if use_evt and evt_layer is not None:
+                    # EVT-based decision
+                    evt_scores = evt_layer.score(features, self.centroids.cuda())  # shape: [B, C]
+                    max_scores, pred = evt_scores.max(dim=1)
+                    # 若EVT得分都低于阈值，认定为unknown类
+                    pred[max_scores < evt_threshold] = self.seen_cls  # unknown类编号为seen_cls
+                else:
+                    pred = logits[:, :self.seen_cls].argmax(dim=-1)
+
                 correct += sum(pred == label).item()
                 wrong += sum(pred != label).item()
+                unknown += sum(pred == self.seen_cls).item()
+
                 for p_i, l_i in zip(pred, label):
-                    pred_labels[l_i.item(), p_i.item()] += 1
-        
-        self.heat_map(pred_labels.cpu().numpy(),heatmap_name)
+                    true_idx = l_i.item()
+                    pred_idx = p_i.item()
+                    if pred_idx >= self.seen_cls: 
+                        pred_idx = self.seen_cls  # unknown
+                    pred_labels[true_idx, pred_idx] += 1
+
+        self.heat_map(pred_labels.cpu().numpy(), heatmap_name)
         acc = correct / (wrong + correct)
-        print("Test Acc: {}".format(acc*100, '.2f'))
+        print("Test Acc (excluding unknowns): {}".format(acc*100, '.2f'))
+        print("Unknown predictions count:", unknown)
         self.model.train()
         print("---------------------------------------------")
         return acc
 
     def validation(self, evaldata, inc_i):
-        print("Validation data number : ",len(evaldata.dataset))
+        print("Validation data number:", len(evaldata.dataset))
         self.model.eval()
         with torch.no_grad():
             correct = 0
             wrong = 0
-            for i, (image, label) in enumerate(evaldata):
+            for image, label in evaldata:
                 image = image.cuda()
                 label = label.view(-1).cuda()
-                p = self.model(image)
-                if inc_i > 0:   # if there is bias correction
-                    p = self.bias_forward(p)
-                pred = p[:,:self.seen_cls].argmax(dim=-1)
+
+                logits = self.model(image)
+                if inc_i > 0:
+                    logits = self.bias_forward(logits)
+
+                pred = logits[:,:self.seen_cls].argmax(dim=-1)
                 correct += sum(pred == label).item()
                 wrong += sum(pred != label).item()
-                pred = p[:,:self.seen_cls].argmax(dim=-1)
-                correct += sum(pred == label).item()
-                wrong += sum(pred != label).item()
-                acc = correct/(correct+wrong)
-        print("Validation Acc: {}".format(format(acc * 100, '.2f')))
+
+            acc = correct / (correct + wrong)
+        print("Validation Acc: {:.2f}%".format(acc * 100))
         self.valacc.append(100*acc)
         self.model.train()
         return acc
+
 
     def get_lr(self, optimizer):
         for param_group in optimizer.param_groups:
             return param_group['lr']
 
-    def train(self, batch_size, epoches, lr, bias_lr, max_size, T = 4):
+    def train(self, batch_size, epoches, lr, bias_lr, max_size, T = 4, evt_threshold = 0.75):
         total_cls = self.total_cls
         criterion = nn.CrossEntropyLoss()
         exemplar = Exemplar(max_size, total_cls)
-        
+        self.evt_threshold = evt_threshold
         previous_model = None
-
+        self.evt_layer = None
         dataset = self.dataset
         test_xs, test_ys, train_xs, train_ys = [], [], [], []
 
@@ -239,28 +264,24 @@ class Trainer:
                 scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
 
             if inc_i > 0:               # Biaslayer trained only if there is bias correction
-                # bias_optimizer = optim.SGD(self.bias_layers[inc_i].parameters(), lr=lr, momentum=0.9)
-                # bias_optimizer = optim.Adam(self.bias_layers[-1].parameters(), lr=0.001) #version 1: only train the last bias layer #inc-1 -> -1
                 optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
                 # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
                 scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
                 bias_optimizer = optim.Adam([param for layer in self.bias_layers for param in layer.parameters()], lr=bias_lr)  #version2: train all the bias layers              
                 # bias_scheduler = StepLR(bias_optimizer, step_size=70, gamma=0.1)
-            # exemplar.update(total_cls//dataset.batch_num, (train_x, train_y), (val_x, val_y))
-            exemplar.update(len(set(train_y) | set(val_y)), (train_x, train_y), (val_x, val_y))   ##bug?
-            # modify to flexible class number, especially for new tasks with old classes
-            # adapt to tasks with repepitition of old classes
+            exemplar.update( (train_x, train_y), (val_x, val_y))   
             self.seen_cls = exemplar.get_cur_cls()
+            # self.seen_cls = self.total_cls
             print("seen cls number : ", self.seen_cls)
             val_xs, val_ys = exemplar.get_exemplar_val()
             val_bias_data = DataLoader(BatchData(val_xs, val_ys, self.input_transform),
-                        batch_size=batch_size, shuffle=True, drop_last=False)    
-
+                        batch_size=batch_size*10, shuffle=True, drop_last=False)    
             val_acc.append([])
             val_acc_noBiC.append([])
             test_acc_in_training_process.append([])      
             
             print("Model FC out_features:", self.model.fc.out_features)
+            
 
             for epoch in range(epoches):
                 print("---"*20)
@@ -279,12 +300,39 @@ class Trainer:
                 else:
                     self.stage1_initial(train_data, criterion, optimizer)
                 acc = self.validation(eval_data, inc_i)
-                acc_test = self.test(test_data, inc_i, 'test1.png')
+                acc_test = self.test(test_data, inc_i, heatmap_name='test1.png', use_evt=True, evt_layer=self.evt_layer, evt_threshold=evt_threshold)
                 test_acc_in_training_process[-1].append(acc_test)
-###
                 val_acc_noBiC[-1].append(acc)
+            
+            if self.evt_layer is None:
+                self.evt_layer = EVTLayer(tail_size=10)  # tail size 可调
+
+            all_data = DataLoader(BatchData(train_xs, train_ys, self.input_transform_eval), 
+                                batch_size=int(len(train)/3), shuffle=True)  
+            all_features = []
+            all_labels = []
+
+            self.model.eval()
+            with torch.no_grad():
+                for image, label in all_data:
+                    image = image.cuda()
+                    label = label.cuda()
+                    _, features = self.model(image, return_features=True)
+                    all_features.append(features)
+                    all_labels.append(label)
+
+            all_features = torch.cat(all_features, dim=0)
+            all_labels = torch.cat(all_labels, dim=0)
+            print("all features shape : ", all_features.shape)
+            print("all labels shape : ", all_labels.shape)
+
+            centroids = self.evt_layer.compute_centroids(all_features, all_labels, self.seen_cls)
+            self.centroids = centroids  #样本中心
+            self.evt_layer.fit_weibull(all_features, all_labels, centroids)
+            exemplar.update(train=(train_xs, train_ys),val=(val_xs, val_ys),features=all_features,labels=all_labels,centroids=centroids,model_images=train_xs)
+
             heatmap_name = f"heatmap_task_{inc_i}_before_BiC.png"
-            test_acc_noBic = self.test(test_data, inc_i, heatmap_name=heatmap_name)
+            test_acc_noBic = self.test(test_data, inc_i, heatmap_name=heatmap_name,use_evt=True, evt_layer=self.evt_layer, evt_threshold=evt_threshold)
             test_accs_noBiC.append(test_acc_noBic)
 
             if inc_i > 0:
@@ -295,14 +343,14 @@ class Trainer:
                     for _ in range(len(self.bias_layers)):
                         self.bias_layers[_].train()
                     self.stage2(val_bias_data, criterion, bias_optimizer)
-                    if epoch % 20 == 0:
+                    if epoch % 10 == 0:
                         acc = self.validation(eval_data, inc_i)
                         val_acc[-1].append(acc)
             for i, layer in enumerate(self.bias_layers):
                 layer.printParam(i)
             self.previous_model = deepcopy(self.model)
             heatmap_name = f"heatmap_task_{inc_i}_after_BiC.png"
-            test_acc = self.test(test_data, inc_i, heatmap_name=heatmap_name)
+            test_acc = self.test(test_data, inc_i, heatmap_name=heatmap_name,use_evt=True, evt_layer=self.evt_layer, evt_threshold=evt_threshold)
             test_accs.append(test_acc)
             print("Test results on testset of model without BiC",test_accs_noBiC)
             print("Test results on testset after BiC training",test_accs)
@@ -373,15 +421,42 @@ class Trainer:
         
 
 
+    # def heat_map(self, data, name="heatmap.png"):
+    #     data = data/data.max(axis=0) # normalization
+    #     plt.clf()
+    #     plt.imshow(data, cmap='Blues', interpolation='nearest', vmin=0, vmax=1)
+    #     plt.colorbar()
+    #     plt.title("Heat Map")
+    #     save_path = os.path.join("output", name)
+    #     plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    #     print(f"Plot saved at: {save_path}")
+
     def heat_map(self, data, name="heatmap.png"):
-        data = data/data.max(axis=0) # normalization
         plt.clf()
-        plt.imshow(data, cmap='Blues', interpolation='nearest', vmin=0, vmax=1)
-        plt.colorbar()
-        plt.title("Heat Map")
+        # 类别标签
+        n = data.shape[0]  # 矩阵维度（假设为正方形矩阵）
+        class_labels = [f'class_{i}' for i in range(n-1)] + ['<unknown>']
+        
+        img = plt.imshow(data, cmap='Blues', interpolation='nearest')
+        plt.colorbar(img)
+
+        plt.xticks(ticks=range(n), labels=class_labels, rotation=45, ha='right')
+        plt.yticks(ticks=range(n), labels=class_labels, rotation=0)
+        plt.xlabel("Predicted Label", fontsize=12)  
+        plt.ylabel("True Label", fontsize=12)        
+        
+        # highlight unknown class
+        for i in range(n):
+            plt.plot([n-0.5, n-0.5], [i-0.5, i+0.5], color='orange', linewidth=2)
+        for j in range(n):
+            plt.plot([j-0.5, j+0.5], [n-0.5, n-0.5], color='orange', linewidth=2)
+        
+        plt.title("Confusion Matrix with Unknown Highlighted", fontsize=14)
+        
         save_path = os.path.join("output", name)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Plot saved at: {save_path}")
+
 
     def count_class_samples(self, data):
         class_count = {}
@@ -514,9 +589,8 @@ class Trainer:
         #alpha = (self.seen_cls - 20)/ self.seen_cls
                 #alpha = (self.seen_cls - (self.total_cls // self.dataset.batch_num)) / self.seen_cls
                 # modify to flexible class number 
-        ###### Might be problems on alpha calculation 
-        alpha = (self.seen_cls - self.num_new_cls[-1]) / (self.seen_cls) 
-#########################################################################################################################################        
+        alpha = (self.seen_cls - self.num_new_cls[-1]) / (self.seen_cls)
+        # alpha balancing the distillation loss and the cross entropy loss by new_old class proportion
         print("classification proportion 1-alpha = ", 1-alpha)
         optimizer.zero_grad()
         for i, (image, label) in enumerate(tqdm(train_data)):
