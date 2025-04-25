@@ -34,7 +34,7 @@ class Trainer:
         self.num_new_cls = []
         self.dataset = GXWData()  
         # self.dataset = Cifar100()  # 这里可以选择不同的数据集
-        self.model = PreResNet(32,init_cls).cuda()        # 32 for basicblock   # 47 for bottleneck   
+        self.model = PreResNet(47,init_cls).cuda()        # 32 for basicblock   # 47 for bottleneck   
         print(self.model)
         #self.model = nn.DataParallel(self.model, device_ids=[0,1])
         self.model = self.model.cuda()  # 将模型移动到 GPU 0
@@ -82,7 +82,7 @@ class Trainer:
     def expand_model(self, new_cls):
         old_state_dict = self.model.state_dict()
         # define new model with expanded fc layer
-        self.model = PreResNet(32, self.total_cls + new_cls).cuda()     
+        self.model = PreResNet(47, self.total_cls + new_cls).cuda()     
         new_state_dict = self.model.state_dict()
 
         for name, param in old_state_dict.items():
@@ -275,7 +275,7 @@ class Trainer:
             print("seen cls number : ", self.seen_cls)
             val_xs, val_ys = exemplar.get_exemplar_val()
             val_bias_data = DataLoader(BatchData(val_xs, val_ys, self.input_transform),
-                        batch_size=batch_size*10, shuffle=True, drop_last=False)    
+                        batch_size=batch_size, shuffle=True, drop_last=False)    
             val_acc.append([])
             val_acc_noBiC.append([])
             test_acc_in_training_process.append([])      
@@ -308,7 +308,7 @@ class Trainer:
                 self.evt_layer = EVTLayer(tail_size=10)  # tail size 可调
 
             all_data = DataLoader(BatchData(train_xs, train_ys, self.input_transform_eval), 
-                                batch_size=int(len(train)/3), shuffle=True)  
+                                batch_size=int(128), shuffle=True)  
             all_features = []
             all_labels = []
 
@@ -321,14 +321,15 @@ class Trainer:
                     all_features.append(features)
                     all_labels.append(label)
 
-            all_features = torch.cat(all_features, dim=0)
-            all_labels = torch.cat(all_labels, dim=0)
-            print("all features shape : ", all_features.shape)
-            print("all labels shape : ", all_labels.shape)
+                all_features = torch.cat(all_features, dim=0)
+                all_labels = torch.cat(all_labels, dim=0)
+                print("all features shape : ", all_features.shape)
+                print("all labels shape : ", all_labels.shape)
 
-            centroids = self.evt_layer.compute_centroids(all_features, all_labels, self.seen_cls)
-            self.centroids = centroids  #样本中心
-            self.evt_layer.fit_weibull(all_features, all_labels, centroids)
+                centroids = self.evt_layer.compute_centroids(all_features, all_labels, self.seen_cls)
+                self.centroids = centroids  #样本中心
+                self.evt_layer.fit_weibull(all_features, all_labels, centroids)
+
             exemplar.update(train=(train_xs, train_ys),val=(val_xs, val_ys),features=all_features,labels=all_labels,centroids=centroids,model_images=train_xs)
 
             heatmap_name = f"heatmap_task_{inc_i}_before_BiC.png"
@@ -576,7 +577,7 @@ class Trainer:
             # p = self.bias_forward(p)    #no meed for bias_forward in initial training
             loss = criterion(p[:,:self.seen_cls], label)
             loss.backward(retain_graph=True)
-            if (i + 1) % 13 == 0:
+            if (i + 1) % 10 == 0:
                 optimizer.step()
                 optimizer.zero_grad()
             losses.append(loss.item())
@@ -608,7 +609,7 @@ class Trainer:
             loss = loss_soft_target * T * T + (1-alpha) * loss_hard_target
 
             loss.backward(retain_graph=True)
-            if (i + 1) % 13 == 0:
+            if (i + 1) % 8 == 0:
                 optimizer.step()
                 optimizer.zero_grad()
                 
@@ -628,7 +629,7 @@ class Trainer:
             p = self.bias_forward(p)
             loss = criterion(p[:,:self.seen_cls], label)
             loss.backward()
-            if (i + 1) % 13 == 0:
+            if (i + 1) % 4 == 0:
                 optimizer.step()
                 optimizer.zero_grad()
             optimizer.step()
