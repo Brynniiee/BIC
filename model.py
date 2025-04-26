@@ -143,13 +143,13 @@ class PreResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x, return_features=False):
+    def forward(self, x, return_features=False, return_attentions=False):
         x = self.conv1(x)
 
-        x = self.layer1(x)  # 32x32
-        x = self.layer2(x)  # 16x16
-        x = self.layer3(x)  # 8x8
-        x = self.bn(x)
+        f1 = self.layer1(x)  # 32x32
+        f2 = self.layer2(f1)  # 16x16
+        f3 = self.layer3(f2)  # 8x8
+        x = self.bn(f3)
         x = self.relu(x)
 
         x = self.avgpool(x)
@@ -158,6 +158,9 @@ class PreResNet(nn.Module):
 
         if return_features==True:
             return logits, features
+        
+        if return_attentions==True:
+            return logits, [f1, f2, f3]
         
         return logits
 
