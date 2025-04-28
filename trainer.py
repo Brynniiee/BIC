@@ -145,7 +145,7 @@ class Trainer:
         for param_group in optimizer.param_groups:
             return param_group['lr']
 
-    def train(self, batch_size, epoches, lr, bias_lr, max_size, T = 4):
+    def train(self, batch_size, epoches, lr, bias_lr, max_size, T = 4, evt_threshold = 0.75, beta = 0.5):
         total_cls = self.total_cls
         criterion = nn.CrossEntropyLoss()
         exemplar = Exemplar(max_size, total_cls)
@@ -275,7 +275,7 @@ class Trainer:
                         self.bias_layers[_].eval()
                     #self.bias_layers[_].eval()
                 if inc_i > 0:
-                    self.stage1_distill(train_data, criterion, optimizer, num_new_cls, T = T)
+                    self.stage1_distill(train_data, criterion, optimizer, num_new_cls, T = T, beta = beta)
                 else:
                     self.stage1_initial(train_data, criterion, optimizer)
                 acc = self.validation(eval_data, inc_i)
@@ -507,31 +507,37 @@ class Trainer:
             losses.append(loss.item())
         print("stage1 loss :", np.mean(losses))
 
-    def stage1_distill(self, train_data, criterion, optimizer, num_new_cls, T=4):
+    def stage1_distill(self, train_data, criterion, optimizer, num_new_cls, T=4, beta=0.5):
         print("Training ... ")
         distill_losses = []
         ce_losses = []
-        #alpha = (self.seen_cls - 20)/ self.seen_cls
-                #alpha = (self.seen_cls - (self.total_cls // self.dataset.batch_num)) / self.seen_cls
-                # modify to flexible class number 
-        ###### Might be problems on alpha calculation 
         alpha = (self.seen_cls - self.num_new_cls[-1]) / (self.seen_cls) 
-#########################################################################################################################################        
+        beta = beta
         print("classification proportion 1-alpha = ", 1-alpha)
         optimizer.zero_grad()
         for i, (image, label) in enumerate(tqdm(train_data)):
             image = image.cuda()
             label = label.view(-1).cuda()
-            p = self.model(image)
+            p, feats = self.model(image, return_features=False, return_attentions=True)
             p = self.bias_forward(p)
             with torch.no_grad():
-                pre_p = self.previous_model(image)
+                pre_p, pre_feats = self.previous_model(image, return_features=False, return_attentions=True)
                 pre_p = self.bias_forward(pre_p)
                 pre_p = F.softmax(pre_p[:,:self.seen_cls-num_new_cls]/T, dim=1)  
             logp = F.log_softmax(p[:,:self.seen_cls-num_new_cls]/T, dim=1)       
             loss_soft_target = -torch.mean(torch.sum(pre_p * logp, dim=1))
             loss_hard_target = nn.CrossEntropyLoss()(p[:,:self.seen_cls], label)
-            loss = loss_soft_target * T * T + (1-alpha) * loss_hard_target
+            attn_loss = 0
+            for f, pf in zip(feats, pre_feats):
+                attn = self.get_attention_map(f)
+                pre_attn = self.get_attention_map(pf)
+                attn_loss += F.mse_loss(attn, pre_attn)
+                if not torch.isfinite(attn).all():
+                    print("Non-finite student_attn:", attn)
+                if not torch.isfinite(pre_attn).all():
+                    print("Non-finite teacher_attn:", pre_attn)
+            attn_loss /= len(feats)
+            loss = loss_soft_target * T * T + (1 - alpha) * loss_hard_target + beta * attn_loss
 
             loss.backward(retain_graph=True)
             if (i + 1) % 13 == 0:
@@ -560,3 +566,17 @@ class Trainer:
             optimizer.step()
             losses.append(loss.item())
         print("stage2 loss :", np.mean(losses))
+
+    def get_attention_map(self, feature_map, eps=1e-6):
+         # feature_map: [B, C, H, W]
+         attn_map = torch.norm(feature_map, p=2, dim=1)  # [B, H, W]
+         attn_map = attn_map.view(attn_map.size(0), -1)  # [B, H*W]
+ 
+         attn_map = attn_map - attn_map.min(dim=1, keepdim=True)[0]  # 归一化前减最小值
+         attn_map = attn_map / (attn_map.max(dim=1, keepdim=True)[0] + eps)  # 避免除以0
+ 
+         if not torch.isfinite(attn_map).all():
+             print("attention map contains NaN/Inf")
+             attn_map = torch.nan_to_num(attn_map, nan=0.0, posinf=0.0, neginf=0.0)
+         
+         return attn_map
