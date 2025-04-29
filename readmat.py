@@ -73,6 +73,7 @@ class GXWData:
         print("Train Samples after augmentation:", {k: len(v) for k, v in train_data_by_label.items()})
         print("Val Samples after augmentation:", {k: len(v) for k, v in val_data_by_label.items()})
         print("Test Samples after augmentation:", {k: len(v) for k, v in test_data_by_label.items()})
+        print("class_to_idx mapping:", self.class_to_idx)
         return train_groups, val_groups, test_groups
 
 
@@ -140,23 +141,29 @@ class GXWData:
             label_groups[label].append(sample)
         return label_groups
     
-    def balance_with_augmentation(self, data_by_label):
-        """Augmentation to balance the number of samples in each class,
-        sothat the number of samples in each class is greater than 1/2 samples in the largest class
-        Args:
-            data_by_label: data grouped by label, type = dict, {label: [data1, data2, ...]}
-        Returns:
-            augmented_data: type = list,[(data,label),...] 
+    def balance_with_augmentation(self, data_by_label, assumed_max_count=None):
         """
-        all_labels = data_by_label.keys()
+        Augmentation to balance the number of samples in each class,
+        so that the number of samples in each class is greater than 1/2 of the assumed max class size.
+
+        Args:
+            data_by_label: dict, {label: [data1, data2, ...]}
+            assumed_max_count: int, optional. If provided, use as the max class count instead of real data.
+
+        Returns:
+            augmented_data: list of (data, label)
+        """
         class_counts = {k: len(v) for k, v in data_by_label.items()}
-        max_count = max(class_counts.values())  
+        if assumed_max_count is not None:
+            max_count = assumed_max_count
+        else:
+            max_count = max(class_counts.values())
+
         augmented_data = []
 
         for label, samples in tqdm(data_by_label.items(), desc="Balancing classes", leave=True):
             current_count = len(samples)
             if current_count <= max_count // 2:
-                # if too few samples, augment the data to more than half of the largest class
                 augmentation_factor = max_count // current_count - 1
                 if augmentation_factor > 0:
                     for s in tqdm(samples, desc=f"Augmenting {label}", leave=False):
@@ -197,6 +204,59 @@ class GXWData:
                 s_shifted = s_shifted[:, :target_len]
             augmented.append(s_shifted.astype(np.float32))
         return augmented
+
+    def extract_small_balanced_set(self, split='train', per_class=50):
+        """
+        Extract a small balanced subset from the full set,
+        where each class is represented by `per_class` samples,
+        and further balance the class sample numbers by augmentation.
+
+        Args:
+            split (str): One of 'train', 'val', or 'test'.
+            per_class (int): Number of samples per class to initially extract.
+
+        Returns:
+            balanced_augmented_subset: list of (data, label)
+        """
+        if split == 'train':
+            groups = self.train_groups
+            allowed_classes = getattr(self, 'seen_classes', None)  # Only use seen classes in train
+        elif split == 'test':
+            groups = self.test_groups # Openset Test Data
+            allowed_classes = None
+        else:
+            raise ValueError(f"Invalid split: {split}. Choose from 'train' or 'test'.")
+
+        # flatten all tasks into one list
+        all_data = sum(groups, [])
+
+        # group by label
+        label_to_samples = {}
+        for data, label in all_data:
+            if allowed_classes is not None and label not in allowed_classes:
+                continue  # skip unseen classes in 'train'
+            if label not in label_to_samples:
+                label_to_samples[label] = []
+            label_to_samples[label].append(data)
+
+        # sample per_class per label
+        balanced_subset = []
+        new_label_to_samples = {}
+        for label, samples in label_to_samples.items():
+            if len(samples) < per_class:
+                print(f"Warning: Label {label} only has {len(samples)} samples, using all of them.")
+                chosen = samples
+            else:
+                chosen = random.sample(samples, per_class)
+            balanced_subset.extend([(x, label) for x in chosen])
+            new_label_to_samples[label] = chosen  # keep grouped by label for augmentation
+
+        # augmentation
+        augmented_data = self.balance_with_augmentation(new_label_to_samples, assumed_max_count=2 * per_class)
+
+        final_subset = balanced_subset + augmented_data
+
+        return final_subset
 
 
 

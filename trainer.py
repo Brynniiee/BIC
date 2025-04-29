@@ -32,9 +32,10 @@ class Trainer:
         self.seen_cls = 0
         self.num_new_cls = []
         self.dataset = GXWData()  
+        self.openset = GXWData()
         # self.dataset = Cifar100()  # 这里可以选择不同的数据集
         self.model = PreResNet(47,init_cls).cuda()        # formerly 32 for basicblock                          
-        print(self.model)
+        # print(self.model)
         #self.model = nn.DataParallel(self.model, device_ids=[0,1])
         self.model = self.model.cuda()  # 将模型移动到 GPU 0
         self.lossdecay = []
@@ -91,8 +92,10 @@ class Trainer:
         self.seen_cls += new_cls  # update seen_cls  
 
     
-    def test(self, testdata, inc_i, heatmap_name):  # used in phased test, producing heatmap
-        print("test data number : ",len(testdata.dataset)) 
+    def test(self, testdata, inc_i, heatmap_name=None):  # used in phased test, producing heatmap
+        print("test set size : ",len(testdata.dataset))
+        per_class_correct = [0 for _ in range(self.seen_cls)]
+        per_class_total = [0 for _ in range(self.seen_cls)]
         self.model.eval()  
         with torch.no_grad():
             correct = 0
@@ -109,10 +112,30 @@ class Trainer:
                 wrong += sum(pred != label).item()
                 for p_i, l_i in zip(pred, label):
                     pred_labels[l_i.item(), p_i.item()] += 1
-        
-        self.heat_map(pred_labels.cpu().numpy(),heatmap_name)
+                    if p_i.item() == l_i.item():
+                        correct += 1
+                        per_class_correct[l_i.item()] += 1
+                    else:
+                        wrong += 1
+                    per_class_total[l_i.item()] += 1
         acc = correct / (wrong + correct)
-        print("Test Acc: {}".format(acc*100, '.2f'))
+        print("Total Test Acc: {}".format(acc*100, '.2f'))
+        if heatmap_name is not None:
+            self.heat_map(pred_labels.cpu().numpy(),heatmap_name)
+            # 各类准确率
+            print("Per-class accuracy:")
+            pc_accs = []
+            for i in range(self.seen_cls):
+                pc_total = per_class_total[i]
+                pc_correct = per_class_correct[i]
+                pc_acc= pc_correct / pc_total * 100 if pc_total > 0 else 0
+                pc_accs.append(pc_acc)
+                if pc_total > 0:
+                    class_acc = pc_correct / pc_total * 100
+                    print(f"  Class {i:02d} — {pc_correct}/{pc_total} = {class_acc:.2f}%")
+                else:
+                    print(f"  Class {i:02d} — No samples.")
+            return acc,pc_accs
         self.model.train()
         print("---------------------------------------------")
         return acc
@@ -154,12 +177,21 @@ class Trainer:
 
         dataset = self.dataset
         test_xs, test_ys, train_xs, train_ys = [], [], [], []
+        biastrain_xs, biastrain_ys = [], []
+        opensettest_xs, opensettest_ys = [], []
 
         val_acc_noBiC = []
         val_acc = []
         test_acc_in_training_process = []
         test_accs = []
         test_accs_noBiC = []
+        per_class_accuracies = []
+        per_class_accuracies_noBiC = []
+
+        opensettest_data = dataset.extract_small_balanced_set(split='test', per_class=100)
+        opensettest_x, opensettest_y = zip(*opensettest_data)
+        opensettest_xs.extend(opensettest_x)
+        opensettest_ys.extend(opensettest_y)
 
         for inc_i in range(dataset.batch_num):
             print(f"Incremental num: {inc_i}")
@@ -226,6 +258,11 @@ class Trainer:
             train_ys.extend(train_y)
             train_ys.extend(val_y)
 
+            biastrain_data = dataset.extract_small_balanced_set(split='train', per_class=30)
+            biastrain_x, biastrain_y = zip(*biastrain_data)
+            biastrain_xs.extend(biastrain_x)
+            biastrain_ys.extend(biastrain_y) 
+
 
             train_data = DataLoader(BatchData(train_xs, train_ys, self.input_transform),
                         batch_size=batch_size, shuffle=True, drop_last=True)
@@ -252,17 +289,17 @@ class Trainer:
             # adapt to tasks with repepitition of old classes
             self.seen_cls = exemplar.get_cur_cls()
             print("seen cls number : ", self.seen_cls)
-            val_xs, val_ys = exemplar.get_exemplar_val()
-            val_bias_data = DataLoader(BatchData(val_xs, val_ys, self.input_transform),
-                        batch_size=batch_size, shuffle=True, drop_last=False)    
+            # val_xs, val_ys = exemplar.get_exemplar_val()
+            bias_data = DataLoader(BatchData(biastrain_xs, biastrain_ys, self.input_transform),
+                        batch_size=batch_size*2, shuffle=True, drop_last=False)    
 
             val_acc.append([])
             val_acc_noBiC.append([])
-            test_acc_in_training_process.append([])      
+            test_acc_in_training_process.append([])     
             
             print("Model FC out_features:", self.model.fc.out_features)
 
-            for epoch in range(epoches):
+            for epoch in range(int(epoches/2)):
                 print("---"*20)
                 print("current incremental task : ", inc_i)
                 print("Epoch", epoch)
@@ -279,33 +316,36 @@ class Trainer:
                 else:
                     self.stage1_initial(train_data, criterion, optimizer)
                 acc = self.validation(eval_data, inc_i)
-                acc_test = self.test(test_data, inc_i, 'test1.png')
+                acc_test = self.test(test_data, inc_i)
                 test_acc_in_training_process[-1].append(acc_test)
 ###
                 val_acc_noBiC[-1].append(acc)
             heatmap_name = f"heatmap_task_{inc_i}_before_BiC.png"
-            test_acc_noBic = self.test(test_data, inc_i, heatmap_name=heatmap_name)
+            test_acc_noBic, per_class_accuracy_noBiC = self.test(test_data, inc_i, heatmap_name=heatmap_name)
             test_accs_noBiC.append(test_acc_noBic)
-
+            per_class_accuracies_noBiC.append(per_class_accuracy_noBiC)
             if inc_i > 0:
-                for epoch in range(2*epoches):
+                for epoch in range(int(epoches)):
                     # bias_scheduler.step()
                     with torch.no_grad():
                         self.model.eval()
                     for _ in range(len(self.bias_layers)):
                         self.bias_layers[_].train()
-                    self.stage2(val_bias_data, criterion, bias_optimizer)
-                    if epoch % 20 == 0:
-                        acc = self.validation(eval_data, inc_i)
-                        val_acc[-1].append(acc)
+                    self.stage2(bias_data, criterion, bias_optimizer)
+                    print("train data number : ",len(biastrain_data))
+                    acc = self.test(test_data, inc_i)
+                    val_acc[-1].append(acc)
             for i, layer in enumerate(self.bias_layers):
                 layer.printParam(i)
             self.previous_model = deepcopy(self.model)
             heatmap_name = f"heatmap_task_{inc_i}_after_BiC.png"
-            test_acc = self.test(test_data, inc_i, heatmap_name=heatmap_name)
+            test_acc, per_class_accuracy = self.test(test_data, inc_i, heatmap_name=heatmap_name)
             test_accs.append(test_acc)
+            per_class_accuracies.append(per_class_accuracy)
             print("Test results on testset of model without BiC",test_accs_noBiC)
             print("Test results on testset after BiC training",test_accs)
+            print("Per-class accuracies on testset without BiC",per_class_accuracies_noBiC)
+            print("Per-class accuracies on testset after BiC training",per_class_accuracies)
     
         print("number of new classes seen in each task : ", self.num_new_cls)
         print(f'initial learning rate: {lr}')
@@ -370,15 +410,37 @@ class Trainer:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Plot saved at: {save_path}")
 
-        
-
-
     def heat_map(self, data, name="heatmap.png"):
         data = data/data.max(axis=0) # normalization
         plt.clf()
         plt.imshow(data, cmap='Blues', interpolation='nearest', vmin=0, vmax=1)
         plt.colorbar()
         plt.title("Heat Map")
+        save_path = os.path.join("output", name)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved at: {save_path}")
+
+    def heat_map(self, data, name="heatmap.png"):
+        plt.clf()
+        plt.imshow(data, cmap='Blues', interpolation='nearest', vmin=0, vmax=1)
+        plt.title("Heat Map")
+        # 类别标签
+        n = data.shape[0]  
+        class_labels = [f'class_{i}' for i in range(n)] 
+
+        img = plt.imshow(data, cmap='Blues', interpolation='nearest')
+        plt.colorbar(img)
+        plt.xticks(ticks=range(n), labels=class_labels, rotation=45, ha='right')
+        plt.yticks(ticks=range(n), labels=class_labels, rotation=0)
+        plt.xlabel("Predicted Label", fontsize=12)  
+        plt.ylabel("True Label", fontsize=12)
+        plt.title("Confusion Matrix", fontsize=14)
+        threshold = (data.max() + data.min()) / 2
+        for i in range(n):
+            for j in range(n):
+                colour = 'white' if data[i,j] > threshold else 'black'
+                plt.text(j, i, int(data[i, j]), ha='center', va='center', color=colour, fontsize=16-n)
+
         save_path = os.path.join("output", name)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Plot saved at: {save_path}")
@@ -390,65 +452,6 @@ class Trainer:
                 class_count[label] = 0
             class_count[label] += 1
         return class_count
-
-    # def bias_forward(self, input):  #V1
-    #     in1 = input[:, :20]
-    #     in2 = input[:, 20:40]
-    #     in3 = input[:, 40:60]
-    #     in4 = input[:, 60:80]
-    #     in5 = input[:, 80:100]
-    #     out1 = self.bias_layer1(in1)
-    #     out2 = self.bias_layer2(in2)
-    #     out3 = self.bias_layer3(in3)
-    #     out4 = self.bias_layer4(in4)
-    #     out5 = self.bias_layer5(in5)
-    #     return torch.cat([out1, out2, out3, out4, out5], dim = 1)
-
-#     def bias_forward(self, input): # modify to flexible class number   #V2
-#         out_list = []
-#         #### NEEDS TO BE modify to flexible class number
-#         steps = [self.total_cls // len(self.bias_layers)] * len(self.bias_layers)   # 计算每个 bias_layer 处理多少类
-#         for i in range(self.total_cls % len(self.bias_layers)):
-#             steps[i] += 1
-#         out_list = []
-#         start = 0
-#         for i, step in enumerate(steps):
-#             out_list.append(self.bias_layers[i](input[:, start:start + step]))
-#             start += step
-#         return torch.cat(out_list, dim=1)
-    # def bias_forward(self, input): #V3  
-    #     # modified to different new class number in each task 
-    #     # modified to only train the last bias layer
-    #     num_new_cls = self.num_new_cls
-    #     bias_layers = self.bias_layers
-    #     out = input
-    #     for i in range(len(bias_layers)):
-    #         out[:,sum(num_new_cls[:i]):sum(num_new_cls[:i+1])]=bias_layers[i](out[:,sum(num_new_cls[:i]):sum(num_new_cls[:i+1])])
-    #     return torch.cat(out, dim=1)
-
-    # def bias_forward(self, input):  # V4
-    #     # modified for better performance on task 2
-    #     num_new_cls = self.num_new_cls
-    #     bias_layers = self.bias_layers
-    #     new_input = input[:, :self.seen_cls]
-    #     old_input = input[:, self.seen_cls:]
-    #     out_list = torch.zeros(1,self.total_cls)
-    #     new_output = new_input
-    #     old_output = []
-    #     start = 0
-    #     #bias_forward only used for i > 0
-    #     for i in range(len(bias_layers)):
-    #         end = start + num_new_cls[i]
-
-    #         if i == 0:
-    #             old_output = bias_layers[i](old_input[:, start:end]) 
-    #         else:            
-    #             old_output = torch.cat((old_output,bias_layers[i](old_input[:, start:end])),dim=1)
-    #         start = end
-
-    #     old_output = torch.tensor(old_output)
-    #     out_list = torch.cat((old_output,new_output), dim=1)
-    #     return out_list
 
     def bias_forward(self, input):
         num_new_cls = self.num_new_cls  
@@ -511,6 +514,7 @@ class Trainer:
         print("Training ... ")
         distill_losses = []
         ce_losses = []
+        accumulation_steps = 13
         alpha = (self.seen_cls - self.num_new_cls[-1]) / (self.seen_cls) 
         beta = beta
         print("classification proportion 1-alpha = ", 1-alpha)
@@ -540,7 +544,7 @@ class Trainer:
             loss = loss_soft_target * T * T + (1 - alpha) * loss_hard_target + beta * attn_loss
 
             loss.backward(retain_graph=True)
-            if (i + 1) % 13 == 0:
+            if (i + 1) % accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
                 
@@ -549,21 +553,23 @@ class Trainer:
         print("stage1 distill loss :", np.mean(distill_losses), "ce loss :", np.mean(ce_losses))
         
 
-    def stage2(self, val_bias_data, criterion, optimizer):
+    def stage2(self, bias_data, criterion, optimizer):
         print("Evaluating ... ")
         losses = []
         optimizer.zero_grad()
-        for i, (image, label) in enumerate(tqdm(val_bias_data,leave = False)):
+        accumulation_steps = 3  # 累积3次
+        self.model.train()
+        for i, (image, label) in enumerate(tqdm(bias_data,leave = True)):
             image = image.cuda()
             label = label.view(-1).cuda()
             p = self.model(image)
             p = self.bias_forward(p)
             loss = criterion(p[:,:self.seen_cls], label)
-            loss.backward()
-            if (i + 1) % 13 == 0:
+            # 除以累积步数，防止梯度过大
+            (loss / accumulation_steps).backward()
+            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(bias_data):
                 optimizer.step()
                 optimizer.zero_grad()
-            optimizer.step()
             losses.append(loss.item())
         print("stage2 loss :", np.mean(losses))
 

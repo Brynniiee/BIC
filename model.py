@@ -3,7 +3,6 @@ import torch
 from torch import nn, autograd
 import torchvision.models as models
 from torch.nn import functional as F
-import utils
 
 
 import torch.nn as nn
