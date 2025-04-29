@@ -299,7 +299,7 @@ class Trainer:
             
             print("Model FC out_features:", self.model.fc.out_features)
 
-            for epoch in range(int(epoches/2)):
+            for epoch in range(int(epoches)):
                 print("---"*20)
                 print("current incremental task : ", inc_i)
                 print("Epoch", epoch)
@@ -325,7 +325,7 @@ class Trainer:
             test_accs_noBiC.append(test_acc_noBic)
             per_class_accuracies_noBiC.append(per_class_accuracy_noBiC)
             if inc_i > 0:
-                for epoch in range(int(epoches)):
+                for epoch in range(int(epoches/2)):
                     # bias_scheduler.step()
                     with torch.no_grad():
                         self.model.eval()
