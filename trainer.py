@@ -24,8 +24,10 @@ from readmat import GXWData
 from exemplar import Exemplar
 from copy import deepcopy
 from sklearn.model_selection import train_test_split
-from readmat2 import GXW_data_shift_test
 from readmatrobusteval import ShiftDataLoader
+import torch
+from sklearn.metrics import confusion_matrix, accuracy_score
+import seaborn as sns
 
 
 class Trainer:
@@ -102,6 +104,51 @@ class Trainer:
 
         self.model.load_state_dict(new_state_dict)  # 
         self.seen_cls += new_cls  # update seen_cls  
+
+    # === trainer.py ===
+    def eval_model(self, dataloader, model_path, class_names=None, heatmap_name=None):
+        """
+        载入已保存模型并评估指定 dataloader
+        Args:
+            dataloader (torch.utils.data.DataLoader): 测试数据集
+            model_path (str): 预训练模型路径 (torch.save 的 .pth 文件)
+            class_names (list, optional): 类别名列表，用于打印 (可选)
+            heatmap_name (str, optional): 若指定，生成预测混淆矩阵热力图 (可选)
+        """
+
+        self.model.load_state_dict(torch.load(model_path))
+        self.model.eval()
+
+        all_preds = []
+        all_labels = []
+
+        with torch.no_grad():
+            for images, labels in dataloader:
+                images = images.cuda()
+                labels = labels.view(-1).cuda()
+                outputs = self.model(images)
+                outputs = self.bias_forward(outputs)
+                preds = torch.argmax(outputs, dim=1)
+
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+
+        acc = accuracy_score(all_labels, all_preds)
+        print(f"[EVAL] Accuracy: {acc * 100:.2f}%  | Samples: {len(all_labels)}")
+
+        if heatmap_name:
+            cm = confusion_matrix(all_labels, all_preds)
+            plt.figure(figsize=(8,6))
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                        xticklabels=class_names if class_names else "auto",
+                        yticklabels=class_names if class_names else "auto")
+            plt.xlabel('Predicted')
+            plt.ylabel('True')
+            plt.title('Confusion Matrix')
+            plt.savefig(heatmap_name)
+            print(f"[EVAL] Confusion matrix saved as {heatmap_name}")
+
+        return acc
 
     
     def test(self, testdata, inc_i, heatmap_name=None):  # used in phased test, producing heatmap
@@ -199,6 +246,9 @@ class Trainer:
         test_accs_noBiC = []
         per_class_accuracies = []
         per_class_accuracies_noBiC = []
+        distill_loss_all_tasks = []  
+        ce_loss_all_tasks = []
+        feature_loss_all_tasks = []
 
         opensettest_data = dataset.extract_small_balanced_set(split='test', per_class=100)
         opensettest_x, opensettest_y = zip(*opensettest_data)
@@ -207,18 +257,6 @@ class Trainer:
 
         for inc_i in range(dataset.batch_num):
             print(f"Incremental num: {inc_i}")
-            bias_layer = BiasLayer().cuda()
-
-            # 为每个增量任务添加一个 bias layer 在第二个任务时才加上第一个任务的layer
-            # if inc_i == 1 :
-            #     self.bias_layers.append(bias_layer)
-            #     self.bias_layers.append(bias_layer)
-            # if inc_i > 1:
-                # bias correction layer creation for each Incremental task
-            
-            #if inc_i > 0:
-            self.bias_layers.append(bias_layer) 
-            print('current bias layers number : ', len(self.bias_layers))
 
             train, val, test = dataset.getNextClasses(inc_i)
 
@@ -238,6 +276,19 @@ class Trainer:
             
             print(f"total class till task {inc_i} :{self.total_cls}")
             self.seen_cls = self.total_cls
+            
+            bias_layer = BiasLayer(num_new_cls).cuda()
+
+            # 为每个增量任务添加一个 bias layer 在第二个任务时才加上第一个任务的layer
+            # if inc_i == 1 :
+            #     self.bias_layers.append(bias_layer)
+            #     self.bias_layers.append(bias_layer)
+            # if inc_i > 1:
+                # bias correction layer creation for each Incremental task
+            
+            #if inc_i > 0:
+            self.bias_layers.append(bias_layer) 
+            print('current bias layers number : ', len(self.bias_layers))
 
             print('Training Samples:',len(train),'validation samples:', len(val), 'test samples:', len(test))
             
@@ -308,6 +359,10 @@ class Trainer:
             val_acc.append([])
             val_acc_noBiC.append([])
             test_acc_in_training_process.append([])     
+            if inc_i > 0:
+                distill_loss_all_tasks.append([])
+                feature_loss_all_tasks.append([])
+                ce_loss_all_tasks.append([])
             
             print("Model FC out_features:", self.model.fc.out_features)
 
@@ -324,7 +379,10 @@ class Trainer:
                         self.bias_layers[_].eval()
                     #self.bias_layers[_].eval()
                 if inc_i > 0:
-                    self.stage1_distill(train_data, criterion, optimizer, num_new_cls, T = T, beta = beta)
+                    distill_losses, ce_losses, feature_loss = self.stage1_distill(train_data, criterion, optimizer, num_new_cls, T = T, beta = beta)
+                    distill_loss_all_tasks[-1].append(distill_losses)   
+                    ce_loss_all_tasks[-1].append(ce_losses)             
+                    feature_loss_all_tasks[-1].append(feature_loss)
                 else:
                     self.stage1_initial(train_data, criterion, optimizer)
                 acc = self.validation(eval_data, inc_i)
@@ -360,18 +418,21 @@ class Trainer:
             print("Test results on testset after BiC training",test_accs)
             print("Per-class accuracies on testset without BiC",per_class_accuracies_noBiC)
             print("Per-class accuracies on testset after BiC training",per_class_accuracies)
-    
+            torch.save(self.model.state_dict(), f'model{inc_i}.pth')  #save model
         print("number of new classes seen in each task : ", self.num_new_cls)
         print(f'initial learning rate: {lr}')
         print(f'Bias layer learning rate: {bias_lr}')
         print(f'epoches: {epoches}')
         print(f'Distillation temperature: {T}')
-        #save model
-        torch.save(self.model.state_dict(), 'model.pth')
-        self.trainer_visual(val_acc_noBiC, val_acc, test_accs, test_accs_noBiC, test_acc_in_training_process)
+        print(f'maximum exemplar size: {max_size}')
+        self.trainer_visual(val_acc_noBiC, val_acc, test_accs, test_accs_noBiC, test_acc_in_training_process,
+                            distill_loss_all_tasks=distill_loss_all_tasks, ce_loss_all_tasks=ce_loss_all_tasks, feature_loss_all_tasks=feature_loss_all_tasks
+                            )
 
         
-    def trainer_visual(self, val_acc_noBiC, val_acc, test_accs, test_accs_noBiC, test_acc_in_training_process):
+    def trainer_visual(self, val_acc_noBiC, val_acc, test_accs, test_accs_noBiC, test_acc_in_training_process,
+                       distill_loss_all_tasks=None, ce_loss_all_tasks=None, feature_loss_all_tasks=None
+                       ):
         # stage1 validation accuracy visualization
         save_dir = "output"
         os.makedirs(save_dir, exist_ok=True)  
@@ -393,6 +454,31 @@ class Trainer:
         save_path = os.path.join(save_dir, "Stage1_accuracy_plot.png")
         plt.savefig(save_path, dpi=300, bbox_inches='tight') 
         print(f"Plot saved at: {save_path}")
+
+        # loss visualization 
+        if distill_loss_all_tasks is not None and ce_loss_all_tasks is not None and feature_loss_all_tasks is not None:
+            fig, axs = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
+
+            losses = [distill_loss_all_tasks, ce_loss_all_tasks, feature_loss_all_tasks]
+            titles = ["Distill loss", "CE loss", "Feature loss"]
+            ylabels = ["Distill loss", "CE loss", "Feature loss"]
+
+            for ax, loss_task_list, title, ylabel in zip(axs, losses, titles, ylabels):
+                for i in range(len(loss_task_list)):
+                    task_losses = loss_task_list[i]   # shape = [epoch losses in task i]
+                    epochs = range(len(task_losses))
+                    ax.plot(epochs, task_losses, marker='o', label=f'Task {i+1}')
+                ax.set_ylabel(ylabel)
+                ax.set_title(title)
+                ax.legend()
+                ax.grid(True)
+
+            axs[-1].set_xlabel('Epochs')
+            fig.suptitle('Loss Changes Over Epochs for Each Incremental Task in stage 1', fontsize=14)
+            loss_save_path = os.path.join(save_dir, "Stage1_loss_plot.png")
+            plt.savefig(loss_save_path, dpi=300, bbox_inches='tight')
+            print(f"Loss plot saved at: {loss_save_path}")
+
 
         # stage2 test accuracy visualization
         plt.figure(figsize=(10, 6))  
@@ -528,6 +614,7 @@ class Trainer:
         print("Training ... ")
         distill_losses = []
         ce_losses = []
+        feature_losses = []
         accumulation_steps = 13
         alpha = (self.seen_cls - self.num_new_cls[-1]) / (self.seen_cls) 
         # alpha = 0
@@ -537,10 +624,10 @@ class Trainer:
         for i, (image, label) in enumerate(tqdm(train_data)):
             image = image.cuda()
             label = label.view(-1).cuda()
-            p, feats = self.model(image, return_features=False, return_attentions=True)
+            p, feats = self.model(image, return_features=True, return_attentions=False)
             p = self.bias_forward(p)
             with torch.no_grad():
-                pre_p, pre_feats = self.previous_model(image, return_features=False, return_attentions=True)
+                pre_p, pre_feats = self.previous_model(image, return_features=True, return_attentions=False)
                 pre_p = self.bias_forward(pre_p)
                 pre_p = F.softmax(pre_p[:,:self.seen_cls-num_new_cls]/T, dim=1)  
             logp = F.log_softmax(p[:,:self.seen_cls-num_new_cls]/T, dim=1)       
@@ -556,8 +643,8 @@ class Trainer:
             #         print("Non-finite student_attn:", attn)
             #     if not torch.isfinite(pre_attn).all():
             #         print("Non-finite teacher_attn:", pre_attn)
-            feat_old = pre_feats[-1]
-            feat_new = feats[-1]
+            feat_old = pre_feats
+            feat_new = feats
             feature_loss = F.mse_loss(feat_new, feat_old)
             # attn_loss /= len(feats)
             loss = alpha * loss_soft_target * T * T + alpha * feature_loss + (1 - alpha) * loss_hard_target 
@@ -566,11 +653,14 @@ class Trainer:
             if (i + 1) % accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
-                
             distill_losses.append(loss_soft_target.item())
             ce_losses.append(loss_hard_target.item())
-        print("stage1 distill loss :", np.mean(distill_losses), "ce loss :", np.mean(ce_losses))
-        
+            feature_losses.append(feature_loss.item())
+            distill_loss_epoch_mean = np.mean(distill_losses)
+            ce_loss_epoch_mean = np.mean(ce_losses)
+            feature_loss_epoch_mean = np.mean(feature_losses)
+        print("stage1 distill loss :", distill_loss_epoch_mean, "ce loss :", ce_loss_epoch_mean, "feature loss :", feature_loss_epoch_mean)
+        return distill_loss_epoch_mean, ce_loss_epoch_mean, feature_loss_epoch_mean
 
     def stage2(self, bias_data, criterion, optimizer):
         print("Evaluating ... ")

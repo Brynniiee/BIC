@@ -172,12 +172,44 @@ def preresnet(**kwargs):
     return PreResNet(**kwargs)
 
 
+# class BiasLayer(nn.Module):
+#     def __init__(self):
+#         super(BiasLayer, self).__init__()
+#         self.alpha = nn.Parameter(torch.ones(1, requires_grad=True, device="cuda"))
+#         self.beta = nn.Parameter(torch.zeros(1, requires_grad=True, device="cuda"))
+#     def forward(self, x):
+#         return self.alpha * x + self.beta
+#     def printParam(self, i):
+#         print(f"in layer {i}, alpha = {self.alpha.item()}, beta = {self.beta.item()}")
+
 class BiasLayer(nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes):
         super(BiasLayer, self).__init__()
-        self.alpha = nn.Parameter(torch.ones(1, requires_grad=True, device="cuda"))
-        self.beta = nn.Parameter(torch.zeros(1, requires_grad=True, device="cuda"))
+        # 每个class一个alpha, beta  (IL2M)
+        self.alpha = nn.Parameter(torch.ones(num_classes, device="cuda"))
+        self.beta = nn.Parameter(torch.zeros(num_classes, device="cuda"))
+        self.num_classes = num_classes
+        # weight align scale (WA)
+        self.weight_align_scale = 1.0
+
     def forward(self, x):
-        return self.alpha * x + self.beta
+        # x shape: (batch_size, num_classes)
+        # Expand alpha/beta to match batch_size
+        # shape: (1, num_classes) → broadcast to (batch_size, num_classes)
+        return self.alpha * x * self.weight_align_scale + self.beta
+
+    def update_weight_align(self, classifier):
+        # classifier: nn.Linear
+        with torch.no_grad():
+            weight_norm = classifier.weight.norm(dim=1)  # shape (num_classes,)
+            old_classes = torch.arange(self.num_classes, device="cuda")
+            # mean norm over all classes
+            mean_norm = weight_norm.mean()
+            self.weight_align_scale = 1.0 / mean_norm.item()
+            print(f"[Weight Align] Applied scale factor: {self.weight_align_scale:.4f}")
+
     def printParam(self, i):
-        print(f"in layer {i}, alpha = {self.alpha.item()}, beta = {self.beta.item()}")
+        print(f"[BiasLayer] layer {i}")
+        print(f"  alpha (per class): {self.alpha.detach().cpu().numpy()}")
+        print(f"  beta  (per class): {self.beta.detach().cpu().numpy()}")
+        print(f"  weight_align_scale: {self.weight_align_scale:.4f}")
