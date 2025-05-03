@@ -24,6 +24,8 @@ from readmat import GXWData
 from exemplar import Exemplar
 from copy import deepcopy
 from sklearn.model_selection import train_test_split
+from readmat2 import GXW_data_shift_test
+from readmatrobusteval import ShiftDataLoader
 
 
 class Trainer:
@@ -33,6 +35,15 @@ class Trainer:
         self.num_new_cls = []
         self.dataset = GXWData()  
         self.openset = GXWData()
+        shift_loader = ShiftDataLoader()
+        shift_groups = shift_loader.get_shift_data()
+
+        if len(shift_groups) > 0:
+            shift_x, shift_y = zip(*shift_groups)
+        else:
+            shift_x, shift_y = [], []
+
+
         # self.dataset = Cifar100()  # 这里可以选择不同的数据集
         self.model = PreResNet(47,init_cls).cuda()        # formerly 32 for basicblock                          
         # print(self.model)
@@ -72,7 +83,8 @@ class Trainer:
             transforms.ToTensor(),
             transforms.Normalize([0.5],[0.2]),
         ])
-
+        self.shift_data = DataLoader(BatchData(shift_x, shift_y, self.input_transform_eval),
+                    batch_size=10, shuffle=False)
 
         total_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         print("Solver total trainable parameters : ", total_params)
@@ -340,6 +352,8 @@ class Trainer:
             self.previous_model = deepcopy(self.model)
             heatmap_name = f"heatmap_task_{inc_i}_after_BiC.png"
             test_acc, per_class_accuracy = self.test(test_data, inc_i, heatmap_name=heatmap_name)
+            if self.seen_cls >= 6:
+                shifttestacc, perclsshifttestacc = self.test(self.shift_data, inc_i, heatmap_name=f'shift_test{inc_i}.png')
             test_accs.append(test_acc)
             per_class_accuracies.append(per_class_accuracy)
             print("Test results on testset of model without BiC",test_accs_noBiC)
@@ -516,6 +530,7 @@ class Trainer:
         ce_losses = []
         accumulation_steps = 13
         alpha = (self.seen_cls - self.num_new_cls[-1]) / (self.seen_cls) 
+        # alpha = 0
         beta = beta
         print("classification proportion 1-alpha = ", 1-alpha)
         optimizer.zero_grad()
@@ -529,19 +544,23 @@ class Trainer:
                 pre_p = self.bias_forward(pre_p)
                 pre_p = F.softmax(pre_p[:,:self.seen_cls-num_new_cls]/T, dim=1)  
             logp = F.log_softmax(p[:,:self.seen_cls-num_new_cls]/T, dim=1)       
-            loss_soft_target = -torch.mean(torch.sum(pre_p * logp, dim=1))
+            # loss_soft_target = -torch.mean(torch.sum(pre_p * logp, dim=1))
+            loss_soft_target = F.kl_div(logp, pre_p, reduction='batchmean')
             loss_hard_target = nn.CrossEntropyLoss()(p[:,:self.seen_cls], label)
-            attn_loss = 0
-            for f, pf in zip(feats, pre_feats):
-                attn = self.get_attention_map(f)
-                pre_attn = self.get_attention_map(pf)
-                attn_loss += F.mse_loss(attn, pre_attn)
-                if not torch.isfinite(attn).all():
-                    print("Non-finite student_attn:", attn)
-                if not torch.isfinite(pre_attn).all():
-                    print("Non-finite teacher_attn:", pre_attn)
-            attn_loss /= len(feats)
-            loss = loss_soft_target * T * T + (1 - alpha) * loss_hard_target + beta * attn_loss
+            # attn_loss = 0
+            # for f, pf in zip(feats, pre_feats):
+            #     attn = self.get_attention_map(f)
+            #     pre_attn = self.get_attention_map(pf)
+            #     attn_loss += F.mse_loss(attn, pre_attn)
+            #     if not torch.isfinite(attn).all():
+            #         print("Non-finite student_attn:", attn)
+            #     if not torch.isfinite(pre_attn).all():
+            #         print("Non-finite teacher_attn:", pre_attn)
+            feat_old = pre_feats[-1]
+            feat_new = feats[-1]
+            feature_loss = F.mse_loss(feat_new, feat_old)
+            # attn_loss /= len(feats)
+            loss = alpha * loss_soft_target * T * T + alpha * feature_loss + (1 - alpha) * loss_hard_target 
 
             loss.backward(retain_graph=True)
             if (i + 1) % accumulation_steps == 0:

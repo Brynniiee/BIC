@@ -10,9 +10,9 @@ parser.add_argument('--epoch', default = 80, type = int) # small values for debu
 parser.add_argument('--lr', default = 0.01, type = float) 
 parser.add_argument('--max_size', default = 400, type = int)
 parser.add_argument('--init_cls', default = 0, type = int)  #### total_cls=100 -> init_cls=0
-parser.add_argument('--distill_temperature', default = 2, type = float)
+parser.add_argument('--distill_temperature', default = 1, type = float)
 parser.add_argument('--bias_lr', default = 0.001, type = float)
-parser.add_argument('--beta',default= 0.5, type = float)
+parser.add_argument('--beta',default= 0.0, type = float)
 args = parser.parse_args()
 
 
