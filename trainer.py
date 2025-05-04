@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torchvision.transforms import Compose, CenterCrop, Normalize, Resize, ToTensor, ToPILImage
-from torch.optim.lr_scheduler import LambdaLR, StepLR, ReduceLROnPlateau, OneCycleLR
+from torch.optim.lr_scheduler import LambdaLR, StepLR, ReduceLROnPlateau, OneCycleLR, CosineAnnealingLR
 import numpy as np
 import glob
 import PIL.Image as Image
@@ -227,7 +227,7 @@ class Trainer:
         for param_group in optimizer.param_groups:
             return param_group['lr']
 
-    def train(self, batch_size, epoches, lr, bias_lr, max_size, T = 4, evt_threshold = 0.75, beta = 0.5):
+    def train(self, batch_size, epoches, lr, bias_lr, max_size, T = 4, evt_threshold = 0.75, beta = 0.5, resume_task = 0):
         total_cls = self.total_cls
         criterion = nn.CrossEntropyLoss()
         exemplar = Exemplar(max_size, total_cls)
@@ -249,6 +249,7 @@ class Trainer:
         distill_loss_all_tasks = []  
         ce_loss_all_tasks = []
         feature_loss_all_tasks = []
+        stage2_losses_all_tasks = []
 
         opensettest_data = dataset.extract_small_balanced_set(split='test', per_class=100)
         opensettest_x, opensettest_y = zip(*opensettest_data)
@@ -256,6 +257,38 @@ class Trainer:
         opensettest_ys.extend(opensettest_y)
 
         for inc_i in range(dataset.batch_num):
+            if resume_task > 0:
+                if inc_i < resume_task:
+                    continue
+                elif inc_i == resume_task:
+                    print(f"Resuming from task {resume_task}")
+                    with open(f'num_new_class{resume_task-1}.pkl', 'rb') as f:
+                        self.num_new_cls = pickle.load(f)
+                    with open(f'total_class{resume_task-1}.pkl', 'rb') as f:
+                        self.total_cls = pickle.load(f)
+                    # fc expand
+                    if self.total_cls > 0:
+                        self.expand_model(self.total_cls)
+                    # recover model params
+                    self.model.load_state_dict(torch.load(f'model{resume_task-1}.pth'))
+                    self.previous_model = deepcopy(self.model)
+                    # recover bias layers
+                    for i in range(resume_task):
+                        bias_layer = BiasLayer(self.num_new_cls[i]).cuda()
+                        bias_layer.load_state_dict(torch.load(f'bias_layer{i}.pth'))
+                        self.bias_layers.append(bias_layer)
+                    # restore exemplar
+                    with open(f'exemplar{resume_task-1}.pkl', 'rb') as f:
+                        exemplar = pickle.load(f)
+                    # testset
+                    with open(f'test_data{resume_task - 1}.pkl', 'rb') as f:
+                        test_data_dict = pickle.load(f)
+                    test_xs = test_data_dict['test_xs']
+                    test_ys = test_data_dict['test_ys']
+
+                    print(f"Resume complete! total_cls = {self.total_cls}, num_new_cls = {self.num_new_cls}")
+
+
             print(f"Incremental num: {inc_i}")
 
             train, val, test = dataset.getNextClasses(inc_i)
@@ -279,14 +312,6 @@ class Trainer:
             
             bias_layer = BiasLayer(num_new_cls).cuda()
 
-            # 为每个增量任务添加一个 bias layer 在第二个任务时才加上第一个任务的layer
-            # if inc_i == 1 :
-            #     self.bias_layers.append(bias_layer)
-            #     self.bias_layers.append(bias_layer)
-            # if inc_i > 1:
-                # bias correction layer creation for each Incremental task
-            
-            #if inc_i > 0:
             self.bias_layers.append(bias_layer) 
             print('current bias layers number : ', len(self.bias_layers))
 
@@ -336,14 +361,14 @@ class Trainer:
             if inc_i == 0:
                 optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
                 # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
-                scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
+                scheduler = CosineAnnealingLR(optimizer, T_max=40)
 
             if inc_i > 0:               # Biaslayer trained only if there is bias correction
                 # bias_optimizer = optim.SGD(self.bias_layers[inc_i].parameters(), lr=lr, momentum=0.9)
                 # bias_optimizer = optim.Adam(self.bias_layers[-1].parameters(), lr=0.001) #version 1: only train the last bias layer #inc-1 -> -1
                 optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
                 # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
-                scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
+                scheduler = CosineAnnealingLR(optimizer, T_max=40)
                 bias_optimizer = optim.Adam([param for layer in self.bias_layers for param in layer.parameters()], lr=bias_lr)  #version2: train all the bias layers              
                 # bias_scheduler = StepLR(bias_optimizer, step_size=70, gamma=0.1)
             # exemplar.update(total_cls//dataset.batch_num, (train_x, train_y), (val_x, val_y))
@@ -363,6 +388,7 @@ class Trainer:
                 distill_loss_all_tasks.append([])
                 feature_loss_all_tasks.append([])
                 ce_loss_all_tasks.append([])
+                stage2_losses_all_tasks.append([])
             
             print("Model FC out_features:", self.model.fc.out_features)
 
@@ -395,13 +421,14 @@ class Trainer:
             test_accs_noBiC.append(test_acc_noBic)
             per_class_accuracies_noBiC.append(per_class_accuracy_noBiC)
             if inc_i > 0:
-                for epoch in range(int(epoches/2)):
+                for epoch in range(int(epoches)):
                     # bias_scheduler.step()
                     with torch.no_grad():
                         self.model.eval()
                     for _ in range(len(self.bias_layers)):
                         self.bias_layers[_].train()
-                    self.stage2(bias_data, criterion, bias_optimizer)
+                    loss_stage2 = self.stage2(bias_data, criterion, bias_optimizer)
+                    stage2_losses_all_tasks[-1].append(loss_stage2)
                     print("train data number : ",len(biastrain_data))
                     acc = self.test(test_data, inc_i)
                     val_acc[-1].append(acc)
@@ -418,7 +445,17 @@ class Trainer:
             print("Test results on testset after BiC training",test_accs)
             print("Per-class accuracies on testset without BiC",per_class_accuracies_noBiC)
             print("Per-class accuracies on testset after BiC training",per_class_accuracies)
-            torch.save(self.model.state_dict(), f'model{inc_i}.pth')  #save model
+            torch.save(self.model.state_dict(), f'model{inc_i}.pth')  
+            torch.save(self.bias_layers[-1].state_dict(), f'bias_layer{inc_i}.pth')
+            with open(f'total_class{inc_i}.pkl', 'wb') as f:
+                pickle.dump(self.seen_cls, f)
+            with open(f'num_new_class{inc_i}.pkl', 'wb') as f:
+                pickle.dump(self.num_new_cls, f)
+            with open(f'exemplar{inc_i}.pkl', 'wb') as f:
+                pickle.dump(exemplar, f)
+            with open(f'test_data{inc_i}.pkl', 'wb') as f:
+                pickle.dump({'test_xs': test_xs, 'test_ys': test_ys}, f)
+            #save model & bias layer
         print("number of new classes seen in each task : ", self.num_new_cls)
         print(f'initial learning rate: {lr}')
         print(f'Bias layer learning rate: {bias_lr}')
@@ -426,12 +463,14 @@ class Trainer:
         print(f'Distillation temperature: {T}')
         print(f'maximum exemplar size: {max_size}')
         self.trainer_visual(val_acc_noBiC, val_acc, test_accs, test_accs_noBiC, test_acc_in_training_process,
-                            distill_loss_all_tasks=distill_loss_all_tasks, ce_loss_all_tasks=ce_loss_all_tasks, feature_loss_all_tasks=feature_loss_all_tasks
+                            distill_loss_all_tasks=distill_loss_all_tasks, ce_loss_all_tasks=ce_loss_all_tasks, feature_loss_all_tasks=feature_loss_all_tasks,
+                            stage2_losses_all_tasks=stage2_losses_all_tasks
                             )
 
         
     def trainer_visual(self, val_acc_noBiC, val_acc, test_accs, test_accs_noBiC, test_acc_in_training_process,
-                       distill_loss_all_tasks=None, ce_loss_all_tasks=None, feature_loss_all_tasks=None
+                       distill_loss_all_tasks=None, ce_loss_all_tasks=None, feature_loss_all_tasks=None,
+                       stage2_losses_all_tasks=None
                        ):
         # stage1 validation accuracy visualization
         save_dir = "output"
@@ -456,12 +495,12 @@ class Trainer:
         print(f"Plot saved at: {save_path}")
 
         # loss visualization 
-        if distill_loss_all_tasks is not None and ce_loss_all_tasks is not None and feature_loss_all_tasks is not None:
+        if distill_loss_all_tasks is not None and ce_loss_all_tasks is not None:
             fig, axs = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
 
-            losses = [distill_loss_all_tasks, ce_loss_all_tasks, feature_loss_all_tasks]
-            titles = ["Distill loss", "CE loss", "Feature loss"]
-            ylabels = ["Distill loss", "CE loss", "Feature loss"]
+            losses = [distill_loss_all_tasks, ce_loss_all_tasks]
+            titles = ["Distill loss", "CE loss"]
+            ylabels = ["Distill loss", "CE loss"]
 
             for ax, loss_task_list, title, ylabel in zip(axs, losses, titles, ylabels):
                 for i in range(len(loss_task_list)):
@@ -486,7 +525,7 @@ class Trainer:
             epochs = range(len(val_acc[i])) 
             plt.plot(epochs , val_acc[i], label=f"Task {i} validation accuracy", color='orange')  
             
-        plt.xlabel("Epoch/20_Epochs")
+        plt.xlabel("Epochs")
         plt.ylabel("Accuracy/%")
         plt.title("Accuracy Changes Over Epochs for Each Incremental Task in stage 2")
         plt.legend()  
@@ -494,6 +533,23 @@ class Trainer:
         save_path = os.path.join(save_dir, "Stage2_accuracy_plot.png")
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Plot saved at: {save_path}")
+
+        # stage2 loss visualization
+        if stage2_losses_all_tasks is not None:
+            for i in range(len(stage2_losses_all_tasks)):
+                plt.figure(figsize=(10, 6))
+                task_losses = stage2_losses_all_tasks[i] 
+                plt.plot(task_losses, marker='o', label=f'Task {i+1}')
+            plt.xlabel('Epochs')
+            plt.ylabel('Loss')
+            plt.title(f'Stage 2 Loss Changes for Task {i+1}')
+            plt.legend()
+            plt.grid(True)
+            loss_save_path = os.path.join(save_dir, f"Stage2_loss_plot_task_{i+1}.png")
+            plt.savefig(loss_save_path, dpi=300, bbox_inches='tight')
+            print(f"Loss plot saved at: {loss_save_path}")  
+
+
 
         plt.figure(figsize=(10, 6))
         # task accuracy decay visualization
@@ -645,7 +701,8 @@ class Trainer:
             #         print("Non-finite teacher_attn:", pre_attn)
             feat_old = pre_feats
             feat_new = feats
-            feature_loss = F.mse_loss(feat_new, feat_old)
+        ##    feature_loss = F.mse_loss(feat_new, feat_old)
+            feature_loss = 0
             # attn_loss /= len(feats)
             loss = alpha * loss_soft_target * T * T + alpha * feature_loss + (1 - alpha) * loss_hard_target 
 
@@ -655,10 +712,11 @@ class Trainer:
                 optimizer.zero_grad()
             distill_losses.append(loss_soft_target.item())
             ce_losses.append(loss_hard_target.item())
-            feature_losses.append(feature_loss.item())
+        ##    feature_losses.append(feature_loss.item())
             distill_loss_epoch_mean = np.mean(distill_losses)
             ce_loss_epoch_mean = np.mean(ce_losses)
-            feature_loss_epoch_mean = np.mean(feature_losses)
+        ##    feature_loss_epoch_mean = np.mean(feature_losses)
+            feature_loss_epoch_mean = 0
         print("stage1 distill loss :", distill_loss_epoch_mean, "ce loss :", ce_loss_epoch_mean, "feature loss :", feature_loss_epoch_mean)
         return distill_loss_epoch_mean, ce_loss_epoch_mean, feature_loss_epoch_mean
 
@@ -681,6 +739,7 @@ class Trainer:
                 optimizer.zero_grad()
             losses.append(loss.item())
         print("stage2 loss :", np.mean(losses))
+        return np.mean(losses)
 
     def get_attention_map(self, feature_map, eps=1e-6):
          # feature_map: [B, C, H, W]
