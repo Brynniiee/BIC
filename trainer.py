@@ -28,6 +28,7 @@ from readmatrobusteval import ShiftDataLoader
 import torch
 from sklearn.metrics import confusion_matrix, accuracy_score
 import seaborn as sns
+from torch.utils.data import TensorDataset
 
 
 class Trainer:
@@ -104,51 +105,6 @@ class Trainer:
 
         self.model.load_state_dict(new_state_dict)  # 
         self.seen_cls += new_cls  # update seen_cls  
-
-    # === trainer.py ===
-    def eval_model(self, dataloader, model_path, class_names=None, heatmap_name=None):
-        """
-        载入已保存模型并评估指定 dataloader
-        Args:
-            dataloader (torch.utils.data.DataLoader): 测试数据集
-            model_path (str): 预训练模型路径 (torch.save 的 .pth 文件)
-            class_names (list, optional): 类别名列表，用于打印 (可选)
-            heatmap_name (str, optional): 若指定，生成预测混淆矩阵热力图 (可选)
-        """
-
-        self.model.load_state_dict(torch.load(model_path))
-        self.model.eval()
-
-        all_preds = []
-        all_labels = []
-
-        with torch.no_grad():
-            for images, labels in dataloader:
-                images = images.cuda()
-                labels = labels.view(-1).cuda()
-                outputs = self.model(images)
-                outputs = self.bias_forward(outputs)
-                preds = torch.argmax(outputs, dim=1)
-
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
-
-        acc = accuracy_score(all_labels, all_preds)
-        print(f"[EVAL] Accuracy: {acc * 100:.2f}%  | Samples: {len(all_labels)}")
-
-        if heatmap_name:
-            cm = confusion_matrix(all_labels, all_preds)
-            plt.figure(figsize=(8,6))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                        xticklabels=class_names if class_names else "auto",
-                        yticklabels=class_names if class_names else "auto")
-            plt.xlabel('Predicted')
-            plt.ylabel('True')
-            plt.title('Confusion Matrix')
-            plt.savefig(heatmap_name)
-            print(f"[EVAL] Confusion matrix saved as {heatmap_name}")
-
-        return acc
 
     
     def test(self, testdata, inc_i, heatmap_name=None):  # used in phased test, producing heatmap
@@ -361,22 +317,21 @@ class Trainer:
             if inc_i == 0:
                 optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
                 # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
-                scheduler = CosineAnnealingLR(optimizer, T_max=40)
+                # scheduler = CosineAnnealingLR(optimizer, T_max=40)
+                scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
 
             if inc_i > 0:               # Biaslayer trained only if there is bias correction
                 # bias_optimizer = optim.SGD(self.bias_layers[inc_i].parameters(), lr=lr, momentum=0.9)
                 # bias_optimizer = optim.Adam(self.bias_layers[-1].parameters(), lr=0.001) #version 1: only train the last bias layer #inc-1 -> -1
                 optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
                 # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
-                scheduler = CosineAnnealingLR(optimizer, T_max=40)
+                # scheduler = CosineAnnealingLR(optimizer, T_max=40)
+                scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
                 bias_optimizer = optim.Adam([param for layer in self.bias_layers for param in layer.parameters()], lr=bias_lr)  #version2: train all the bias layers              
                 # bias_scheduler = StepLR(bias_optimizer, step_size=70, gamma=0.1)
             # exemplar.update(total_cls//dataset.batch_num, (train_x, train_y), (val_x, val_y))
-            exemplar.update(len(set(train_y) | set(val_y)), (train_x, train_y), (val_x, val_y))   ##bug?
             # modify to flexible class number, especially for new tasks with old classes
             # adapt to tasks with repepitition of old classes
-            self.seen_cls = exemplar.get_cur_cls()
-            print("seen cls number : ", self.seen_cls)
             # val_xs, val_ys = exemplar.get_exemplar_val()
             bias_data = DataLoader(BatchData(biastrain_xs, biastrain_ys, self.input_transform),
                         batch_size=batch_size*2, shuffle=True, drop_last=False)    
@@ -414,8 +369,17 @@ class Trainer:
                 acc = self.validation(eval_data, inc_i)
                 acc_test = self.test(test_data, inc_i)
                 test_acc_in_training_process[-1].append(acc_test)
-###
                 val_acc_noBiC[-1].append(acc)
+
+            features, labels, raw_images = self.extract_features(self.model, train_data, device="cuda")
+
+            centroids = self.compute_class_centroids(features, labels,num_classes=self.seen_cls)
+        
+            exemplar.update(
+                train=(train_x, train_y), val=(val_x, val_y), 
+                features=features, labels=labels, centroids=centroids, model_images=raw_images)
+            
+
             heatmap_name = f"heatmap_task_{inc_i}_before_BiC.png"
             test_acc_noBic, per_class_accuracy_noBiC = self.test(test_data, inc_i, heatmap_name=heatmap_name)
             test_accs_noBiC.append(test_acc_noBic)
@@ -743,14 +707,56 @@ class Trainer:
 
     def get_attention_map(self, feature_map, eps=1e-6):
          # feature_map: [B, C, H, W]
-         attn_map = torch.norm(feature_map, p=2, dim=1)  # [B, H, W]
-         attn_map = attn_map.view(attn_map.size(0), -1)  # [B, H*W]
+        attn_map = torch.norm(feature_map, p=2, dim=1)  # [B, H, W]
+        attn_map = attn_map.view(attn_map.size(0), -1)  # [B, H*W]
  
-         attn_map = attn_map - attn_map.min(dim=1, keepdim=True)[0]  # 归一化前减最小值
-         attn_map = attn_map / (attn_map.max(dim=1, keepdim=True)[0] + eps)  # 避免除以0
+        attn_map = attn_map - attn_map.min(dim=1, keepdim=True)[0]  # 归一化前减最小值
+        attn_map = attn_map / (attn_map.max(dim=1, keepdim=True)[0] + eps)  # 避免除以0
  
-         if not torch.isfinite(attn_map).all():
-             print("attention map contains NaN/Inf")
-             attn_map = torch.nan_to_num(attn_map, nan=0.0, posinf=0.0, neginf=0.0)
+        if not torch.isfinite(attn_map).all():
+            print("attention map contains NaN/Inf")
+            attn_map = torch.nan_to_num(attn_map, nan=0.0, posinf=0.0, neginf=0.0)
          
-         return attn_map
+        return attn_map
+
+    def extract_features(self, model, dataloader, device):
+        """
+        提取 dataloader 中所有样本的特征和标签
+
+        Returns:
+            features: Tensor [N, D]
+            labels: Tensor [N]
+            raw_images: List[N] 原始输入（用于 exemplar 记录）
+        """
+        model.eval()
+        features_list = []
+        labels_list = []
+        raw_images_list = []
+
+        with torch.no_grad():
+            for images, labels in tqdm(dataloader, desc="Extracting features"):
+                images = images.to(device)
+                labels = labels.to(device)
+                logits, feats = model(images, return_features=True)
+                features_list.append(feats.cpu())
+                labels_list.append(labels.cpu())
+                raw_images_list.extend(images.cpu())  # 注意 raw images 是 list
+
+        features = torch.cat(features_list, dim=0)
+        labels = torch.cat(labels_list, dim=0)
+        return features, labels, raw_images_list
+
+    def compute_class_centroids(self, features, labels, num_classes):
+         """
+         features: tensor(样本数 x 特征维度) , 所有样本的特征
+         labels: tensor(样本数）
+         num_classes: seen 总类别数
+         返回: tensor(类别数 x 特征维度)，每个类别的中心向量
+         """
+         centroids = []
+         labels = labels.squeeze()
+         for cls in range(num_classes):
+             cls_feats = features[labels == cls,:]
+             centroid = cls_feats.mean(dim=0)
+             centroids.append(centroid)
+         return torch.stack(centroids)
