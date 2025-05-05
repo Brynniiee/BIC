@@ -119,11 +119,11 @@ class Trainer:
                 new_state_dict[name] = param
         
         # Copy fc weights of old classes
-        old_fc_weight = old_state_dict['fc.weight']  # shape: [old_cls, dim]
-        old_fc_bias = old_state_dict['fc.bias']      # shape: [old_cls]
+        # old_fc_weight = old_state_dict['fc.weight']  # shape: [old_cls, dim]
+        # old_fc_bias = old_state_dict['fc.bias']      # shape: [old_cls]
         print('old class number:',self.seen_cls)
-        new_state_dict['fc.weight'][:old_fc_weight.shape[0]] = old_fc_weight
-        new_state_dict['fc.bias'][:old_fc_weight.shape[0]] = old_fc_bias
+        # new_state_dict['fc.weight'][:old_fc_weight.shape[0]] = old_fc_weight
+        # new_state_dict['fc.bias'][:old_fc_weight.shape[0]] = old_fc_bias
 
         # load weights
         self.model.load_state_dict(new_state_dict)
@@ -367,8 +367,9 @@ class Trainer:
                 #     param.requires_grad = True
 
                 # bias_optimizer = optim.SGD(self.bias_layers[inc_i].parameters(), lr=lr, momentum=0.9)
-                # bias_optimizer = optim.Adam(self.bias_layers[-1].parameters(), lr=0.001) #version 1: only train the last bias layer #inc-1 -> -1
-                self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.model.parameters()),lr=lr,momentum=0.9,weight_decay=2e-4)
+                bias_optimizer = optim.Adam(self.bias_layers[-1].parameters(), lr=0.001) #version 1: only train the last bias layer #inc-1 -> -1
+                # optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.model.parameters()),lr=lr,momentum=0.9,weight_decay=2e-4)
+                optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
 
                 # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
                 # scheduler = CosineAnnealingLR(optimizer, T_max=40)

@@ -188,7 +188,12 @@ class Exemplar:
                 del available_imgs[idx]
 
             exemplars_by_class[cls] = (selected_imgs, [cls]*len(selected_imgs))            
-            self.train = exemplars_by_class     # self.train[cls]: tuple(imgs, labels)
+            for cls, (imgs, labels) in exemplars_by_class.items():
+                if cls in self.train:
+                    old_imgs, old_labels = self.train[cls]
+                    self.train[cls] = (old_imgs + imgs, old_labels + labels)
+                else:
+                    self.train[cls] = (imgs, labels)
         
         return exemplars_by_class
 
@@ -237,6 +242,71 @@ class Exemplar:
             # 存储 (imgs, labels) tuple
             exemplars_by_class[cls] = (selected_imgs, [cls]*len(selected_imgs))
 
+        # Step 3: 可视化
+        self.visualize_feature_space(
+            features=features.cpu(),
+            all_labels=labels.cpu(),
+            selected_mask=selected_mask.cpu(),
+            centroids=centroids.cpu(),
+            method='tsne'
+        )
+
+        # Step 4: 存 self.train （保持和旧版一致）
+        self.train = exemplars_by_class
+
+        return exemplars_by_class
+    
+    def select_exemplars_icarl_from_features(self, features, labels, centroids, num_exemplars_per_class, raw_images, use_kmeans=True):
+        """
+        iCaRL exemplar 选样：K-Means + Random 版
+        """
+        import torch
+        import numpy as np
+        from sklearn.cluster import KMeans
+
+        # Step 1: 归一化
+        device = features.device
+        features = features / features.norm(dim=1, keepdim=True)
+        centroids = centroids / centroids.norm(dim=1, keepdim=True)
+        labels = labels.view(-1)
+
+        exemplars_by_class = {}
+        selected_mask = torch.zeros(len(raw_images), dtype=torch.bool, device=device)
+        unique_classes = torch.unique(labels)
+
+        for cls in unique_classes:
+            cls = cls.item()
+            cls_mask = (labels == cls)
+            cls_indices = cls_mask.nonzero(as_tuple=True)[0]  # 当前类样本索引
+
+            cls_feats = features[cls_indices]  # shape [n_cls, D]
+            cls_imgs = [raw_images[i] for i in cls_indices.tolist()]
+
+            # 取原始特征 (numpy) 用于 KMeans
+            feats_np = cls_feats.cpu().numpy()
+
+            n_clusters = min(num_exemplars_per_class, len(feats_np))
+            if n_clusters < 2 or not use_kmeans:
+                # 样本太少 or 不用KMeans → fallback 原样本随机选
+                selected_local_indices = np.random.choice(len(cls_feats), size=n_clusters, replace=False)
+            else:
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                labels_kmeans = kmeans.fit_predict(feats_np)
+                # 每个 cluster 中随机选1个样本
+                selected_local_indices = []
+                for cluster_id in np.unique(labels_kmeans):
+                    members = np.where(labels_kmeans == cluster_id)[0]
+                    selected_local_indices.append(np.random.choice(members))
+
+            selected_indices = cls_indices[selected_local_indices]
+            selected_imgs = [cls_imgs[i] for i in selected_local_indices]
+
+            # 更新掩码
+            selected_mask[selected_indices] = True
+
+            # 存储 (imgs, labels) tuple
+            exemplars_by_class[cls] = ([img.squeeze(0) for img in selected_imgs], [cls] * len(selected_imgs))
+            
         # Step 3: 可视化
         self.visualize_feature_space(
             features=features.cpu(),
