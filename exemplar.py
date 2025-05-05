@@ -1,3 +1,8 @@
+import os
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
+import numpy as np
 import torch
 
 class Exemplar:
@@ -79,13 +84,13 @@ class Exemplar:
 
         # iCaRL herding : feature centroid l2 
         if features is not None and labels is not None and centroids is not None and model_images is not None:
-            selected = self.select_exemplars_icarl_from_features(
-                features, labels, centroids, train_store_num, model_images
-            )
-            for cls, img_list in selected.items():
-                if cls not in self.train:
-                    self.train[cls] = []
-                self.train[cls].extend(img_list)
+            self.select_exemplars_icarl_from_features(features, labels, centroids, train_store_num, model_images)
+            # for cls, img_list in selected.items():
+            #     if cls not in self.train:
+            #         self.train[cls] = []
+            #     self.train[cls][0].extend(img_list)  # extend images
+            #     self.train[cls][1].extend([cls]*len(img_list))  # extend labels
+
         else:
             # no feature input
             for x, y in zip(train_x, train_y):
@@ -106,11 +111,11 @@ class Exemplar:
     def get_exemplar_train(self):
         exemplar_train_x = []
         exemplar_train_y = []
-        for key, value in self.train.items():
-            for train_x in value:
-                exemplar_train_x.append(train_x)
-                exemplar_train_y.append(key)
+        for key, (images, labels) in self.train.items():
+            exemplar_train_x.extend(images)
+            exemplar_train_y.extend(labels)
         return exemplar_train_x, exemplar_train_y
+
 
     def get_exemplar_val(self):
         exemplar_val_x = []
@@ -182,7 +187,107 @@ class Exemplar:
                 available_feats = torch.cat([available_feats[:idx], available_feats[idx+1:]], dim=0)
                 del available_imgs[idx]
 
-            exemplars_by_class[cls] = selected_imgs
+            exemplars_by_class[cls] = (selected_imgs, [cls]*len(selected_imgs))            
+            self.train = exemplars_by_class     # self.train[cls]: tuple(imgs, labels)
+        
+        return exemplars_by_class
 
+
+    def select_exemplars_icarl_from_features(self, features, labels, centroids, num_exemplars_per_class, raw_images):
+        """
+        iCaRL原始herding选样 + 可视化（改正版）
+        """
+        import torch
+        import os
+        import matplotlib.pyplot as plt
+        from sklearn.manifold import TSNE
+        import numpy as np
+
+        # Step 1: 归一化
+        device = features.device
+        features = features / features.norm(dim=1, keepdim=True)
+        centroids = centroids / centroids.norm(dim=1, keepdim=True)
+        labels = labels.view(-1)
+
+        exemplars_by_class = {}
+        selected_mask = torch.zeros(len(raw_images), dtype=torch.bool, device=device)
+        unique_classes = torch.unique(labels)
+
+        # Step 2: 主循环
+        for cls in unique_classes:
+            cls = cls.item()
+            cls_mask = (labels == cls)
+            cls_indices = cls_mask.nonzero(as_tuple=True)[0]  # 当前类样本索引
+
+            cls_feats = features[cls_indices]  # shape [n_cls, D]
+            cls_imgs = [raw_images[i] for i in cls_indices.tolist()]
+            cls_center = centroids[cls]
+
+            # 计算和质心余弦相似度（即 dot product，因为 normalized）
+            sims = torch.matmul(cls_feats, cls_center)
+            topk = torch.topk(sims, k=min(num_exemplars_per_class, len(cls_feats)))
+
+            selected_indices = cls_indices[topk.indices]  # 全局索引
+            
+            selected_imgs = [raw_images[i].squeeze(0) for i in selected_indices.tolist()]
+
+            # 更新掩码
+            selected_mask[selected_indices] = True
+
+            # 存储 (imgs, labels) tuple
+            exemplars_by_class[cls] = (selected_imgs, [cls]*len(selected_imgs))
+
+        # Step 3: 可视化
+        self.visualize_feature_space(
+            features=features.cpu(),
+            all_labels=labels.cpu(),
+            selected_mask=selected_mask.cpu(),
+            centroids=centroids.cpu(),
+            method='tsne'
+        )
+
+        # Step 4: 存 self.train （保持和旧版一致）
+        self.train = exemplars_by_class
 
         return exemplars_by_class
+
+    def visualize_feature_space(self, features, all_labels, selected_mask, centroids, method='tsne'):
+        import os
+        import matplotlib.pyplot as plt
+        from sklearn.manifold import TSNE
+        from sklearn.decomposition import PCA
+        import numpy as np
+
+        combined = np.concatenate([features.numpy(), centroids.numpy()], axis=0)
+
+        if method == 'tsne':
+            reducer = TSNE(n_components=2, perplexity=30, random_state=42)
+        elif method == 'pca':
+            reducer = PCA(n_components=2)
+        else:
+            raise ValueError("Unsupported method")
+
+        low_dim = reducer.fit_transform(combined)
+        feat_dim = low_dim[:len(features)]
+        centroid_dim = low_dim[len(features):]
+
+        plt.figure(figsize=(15, 12))
+        plt.scatter(feat_dim[~selected_mask, 0], feat_dim[~selected_mask, 1],
+                    c=all_labels[~selected_mask], cmap='tab20', alpha=0.4, label='Unselected', edgecolor='w')
+        sc = plt.scatter(feat_dim[selected_mask, 0], feat_dim[selected_mask, 1],
+                        c=all_labels[selected_mask], cmap='tab20', marker='*',
+                        s=100, label='Selected', edgecolor='k')
+        plt.scatter(centroid_dim[:, 0], centroid_dim[:, 1], c='black',
+                    marker='X', s=200, label='Centroids', edgecolor='gold',
+                    linewidth=1.5)
+
+        plt.title(f'Feature Space Visualization ({method.upper()})')
+        plt.xlabel('Dimension 1')
+        plt.ylabel('Dimension 2')
+        plt.legend(title='Legend')
+        plt.colorbar(sc, label='Class ID')
+        plt.tight_layout()
+        os.makedirs('output', exist_ok=True)
+        plt.savefig(f'output/feature_visualization_{method}.png',
+                    dpi=300, bbox_inches='tight')
+        plt.close()

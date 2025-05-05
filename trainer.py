@@ -29,6 +29,7 @@ import torch
 from sklearn.metrics import confusion_matrix, accuracy_score
 import seaborn as sns
 from torch.utils.data import TensorDataset
+from collections import Counter
 
 
 class Trainer:
@@ -295,13 +296,15 @@ class Trainer:
             test_x, test_y = zip(*test)
             test_xs.extend(test_x)
             test_ys.extend(test_y)
-
+            # exemplar get
             train_xs, train_ys = exemplar.get_exemplar_train()
             train_xs.extend(train_x)
             train_xs.extend(val_x)
             train_ys.extend(train_y)
             train_ys.extend(val_y)
-
+            cls_trainsample = Counter(train_ys)
+            for cls, count in cls_trainsample.items():
+                print(f"Train sample Class with exemplars\n Class {cls}: {count} samples")
             biastrain_data = dataset.extract_small_balanced_set(split='train', per_class=30)
             biastrain_x, biastrain_y = zip(*biastrain_data)
             biastrain_xs.extend(biastrain_x)
