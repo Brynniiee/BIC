@@ -105,6 +105,38 @@ class Trainer:
         self.model.load_state_dict(new_state_dict)  # 
         self.seen_cls += new_cls  # update seen_cls  
 
+    def expand_model(self, new_cls,inc_i):
+        old_state_dict = self.model.state_dict()
+        # define new model with expanded fc layer
+        self.model = PreResNet(47, self.total_cls + new_cls).cuda()
+        new_state_dict = self.model.state_dict()
+
+        # Copy all old feature extractor weights
+        for name, param in old_state_dict.items():
+            if "fc" not in name: # remain all old params in other layers
+                new_state_dict[name] = param
+        if inc_i > 0:
+            # Copy fc weights of old classes
+            old_fc_weight = old_state_dict['fc.weight']  # shape: [old_cls, dim]
+            old_fc_bias = old_state_dict['fc.bias']      # shape: [old_cls]
+            print('old class number:',self.seen_cls)
+            new_state_dict['fc.weight'][:old_fc_weight.shape[0]] = old_fc_weight
+            new_state_dict['fc.bias'][:old_fc_weight.shape[0]] = old_fc_bias
+
+            # load weights
+            self.model.load_state_dict(new_state_dict)
+
+            # # Freeze all
+            self.model.fc.weight.requires_grad = False
+            self.model.fc.bias.requires_grad = False
+
+            # # Unfreeze new classes
+            self.model.fc.weight[self.seen_cls:].requires_grad = True
+            self.model.fc.bias[self.seen_cls:].requires_grad = True
+            # # cannot ""... = False" part of params in a layer
+
+        # update seen_cls
+        self.seen_cls += new_cls
     # === trainer.py ===
     def eval_model(self, dataloader, model_path, class_names=None, heatmap_name=None):
         """
@@ -305,7 +337,7 @@ class Trainer:
 
             if num_new_cls > 0:
                 
-                self.expand_model(num_new_cls)
+                self.expand_model(num_new_cls, inc_i)
             
             print(f"total class till task {inc_i} :{self.total_cls}")
             self.seen_cls = self.total_cls
@@ -364,11 +396,22 @@ class Trainer:
                 scheduler = CosineAnnealingLR(optimizer, T_max=40)
 
             if inc_i > 0:               # Biaslayer trained only if there is bias correction
+                # Freeze layer1 + layer2
+                for param in self.model.layer1.parameters():
+                    param.requires_grad = False
+                for param in self.model.layer2.parameters():
+                    param.requires_grad = False
+                # Open layer3 + layer4
+                for param in self.model.layer3.parameters():
+                    param.requires_grad = True
+
                 # bias_optimizer = optim.SGD(self.bias_layers[inc_i].parameters(), lr=lr, momentum=0.9)
                 # bias_optimizer = optim.Adam(self.bias_layers[-1].parameters(), lr=0.001) #version 1: only train the last bias layer #inc-1 -> -1
-                optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
+                # optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
                 # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
-                scheduler = CosineAnnealingLR(optimizer, T_max=40)
+                optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.model.parameters()),lr=lr,momentum=0.9,weight_decay=2e-4)
+                # scheduler = CosineAnnealingLR(optimizer, T_max=40)
+                scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
                 bias_optimizer = optim.Adam([param for layer in self.bias_layers for param in layer.parameters()], lr=bias_lr)  #version2: train all the bias layers              
                 # bias_scheduler = StepLR(bias_optimizer, step_size=70, gamma=0.1)
             # exemplar.update(total_cls//dataset.batch_num, (train_x, train_y), (val_x, val_y))
