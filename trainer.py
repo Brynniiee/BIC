@@ -3,6 +3,7 @@ import torchvision
 from torchvision.models import vgg16
 from torchvision import transforms
 from torch.utils.data import DataLoader
+from torch.utils.data import WeightedRandomSampler
 from torch.optim import Adam
 import torch.nn as nn
 import torch.nn.functional as F
@@ -28,6 +29,7 @@ from readmatrobusteval import ShiftDataLoader
 import torch
 from sklearn.metrics import confusion_matrix, accuracy_score
 import seaborn as sns
+from collections import Counter
 
 
 class Trainer:
@@ -92,7 +94,7 @@ class Trainer:
         print("Solver total trainable parameters : ", total_params)
 
 
-    def expand_model(self, new_cls):
+    def expand_model(self, new_cls, inc_i):
         old_state_dict = self.model.state_dict()
         # define new model with expanded fc layer
         self.model = PreResNet(47, self.total_cls + new_cls).cuda()     
@@ -105,38 +107,38 @@ class Trainer:
         self.model.load_state_dict(new_state_dict)  # 
         self.seen_cls += new_cls  # update seen_cls  
 
-    def expand_model(self, new_cls,inc_i):
-        old_state_dict = self.model.state_dict()
-        # define new model with expanded fc layer
-        self.model = PreResNet(47, self.total_cls + new_cls).cuda()
-        new_state_dict = self.model.state_dict()
+    # def expand_model(self, new_cls,inc_i):
+    #     old_state_dict = self.model.state_dict()
+    #     # define new model with expanded fc layer
+    #     self.model = PreResNet(47, self.total_cls + new_cls).cuda()
+    #     new_state_dict = self.model.state_dict()
 
-        # Copy all old feature extractor weights
-        for name, param in old_state_dict.items():
-            if "fc" not in name: # remain all old params in other layers
-                new_state_dict[name] = param
-        if inc_i > 0:
-            # Copy fc weights of old classes
-            old_fc_weight = old_state_dict['fc.weight']  # shape: [old_cls, dim]
-            old_fc_bias = old_state_dict['fc.bias']      # shape: [old_cls]
-            print('old class number:',self.seen_cls)
-            new_state_dict['fc.weight'][:old_fc_weight.shape[0]] = old_fc_weight
-            new_state_dict['fc.bias'][:old_fc_weight.shape[0]] = old_fc_bias
+    #     # Copy all old feature extractor weights
+    #     for name, param in old_state_dict.items():
+    #         if "fc" not in name: # remain all old params in other layers
+    #             new_state_dict[name] = param
+    #     if inc_i > 0:
+    #         # Copy fc weights of old classes
+    #         old_fc_weight = old_state_dict['fc.weight']  # shape: [old_cls, dim]
+    #         old_fc_bias = old_state_dict['fc.bias']      # shape: [old_cls]
+    #         print('old class number:',self.seen_cls)
+    #         new_state_dict['fc.weight'][:old_fc_weight.shape[0]] = old_fc_weight
+    #         new_state_dict['fc.bias'][:old_fc_weight.shape[0]] = old_fc_bias
 
-            # load weights
-            self.model.load_state_dict(new_state_dict)
+    #         # load weights
+    #         self.model.load_state_dict(new_state_dict)
 
-            # # Freeze all
-            self.model.fc.weight.requires_grad = False
-            self.model.fc.bias.requires_grad = False
+    #         # # # Freeze all
+    #         # self.model.fc.weight.requires_grad = False
+    #         # self.model.fc.bias.requires_grad = False
 
-            # # Unfreeze new classes
-            self.model.fc.weight[self.seen_cls:].requires_grad = True
-            self.model.fc.bias[self.seen_cls:].requires_grad = True
-            # # cannot ""... = False" part of params in a layer
+    #         # # # Unfreeze new classes
+    #         # self.model.fc.weight[self.seen_cls:].requires_grad = True
+    #         # self.model.fc.bias[self.seen_cls:].requires_grad = True
+    #         # # # cannot ""... = False" part of params in a layer
 
-        # update seen_cls
-        self.seen_cls += new_cls
+    #     # update seen_cls
+    #     self.seen_cls += new_cls
     # === trainer.py ===
     def eval_model(self, dataloader, model_path, class_names=None, heatmap_name=None):
         """
@@ -287,7 +289,7 @@ class Trainer:
         opensettest_x, opensettest_y = zip(*opensettest_data)
         opensettest_xs.extend(opensettest_x)
         opensettest_ys.extend(opensettest_y)
-
+        
         for inc_i in range(dataset.batch_num):
             if resume_task > 0:
                 if inc_i < resume_task:
@@ -300,7 +302,7 @@ class Trainer:
                         self.total_cls = pickle.load(f)
                     # fc expand
                     if self.total_cls > 0:
-                        self.expand_model(self.total_cls)
+                        self.expand_model(self.total_cls, inc_i)
                     # recover model params
                     self.model.load_state_dict(torch.load(f'model{resume_task-1}.pth'))
                     self.previous_model = deepcopy(self.model)
@@ -383,9 +385,29 @@ class Trainer:
             biastrain_xs.extend(biastrain_x)
             biastrain_ys.extend(biastrain_y) 
 
+            if inc_i > 0:
+                class_counts = Counter(train_ys)
+                # 类别权重 = 1 / count
+                class_weights = {cls: 1.0 / count for cls, count in class_counts.items()}
+                # 每个样本加权重
+                sample_weights = [class_weights[label] for label in train_ys]
+                sample_weights = torch.DoubleTensor(sample_weights)
 
-            train_data = DataLoader(BatchData(train_xs, train_ys, self.input_transform),
-                        batch_size=batch_size, shuffle=True, drop_last=True)
+                # 根据样本数的差别提高少数样本的采样概率（重采样）
+                sampler = WeightedRandomSampler(
+                    weights=sample_weights,
+                    num_samples=len(sample_weights),  
+                    replacement=True  # 
+                )
+
+                train_data = DataLoader(BatchData(train_xs, train_ys, self.input_transform),
+                                        batch_size=batch_size,
+                                        sampler=sampler,
+                                        num_workers=4  # 可调
+                                    )
+            if inc_i == 0:
+                train_data = DataLoader(BatchData(train_xs, train_ys, self.input_transform),
+                            batch_size=batch_size, shuffle=True, drop_last=True)
             eval_data = DataLoader(BatchData(val_x, val_y, self.input_transform_eval),
                         batch_size=batch_size*10, shuffle=False)
             test_data = DataLoader(BatchData(test_xs, test_ys, self.input_transform_eval),
@@ -394,16 +416,17 @@ class Trainer:
                 optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9,  weight_decay=2e-4)
                 # scheduler = LambdaLR(optimizer, lr_lambda=adjust_cifar100)
                 scheduler = CosineAnnealingLR(optimizer, T_max=40)
+                scheduler = StepLR(optimizer, step_size=70, gamma=0.1)
 
             if inc_i > 0:               # Biaslayer trained only if there is bias correction
-                # Freeze layer1 + layer2
-                for param in self.model.layer1.parameters():
-                    param.requires_grad = False
-                for param in self.model.layer2.parameters():
-                    param.requires_grad = False
-                # Open layer3 + layer4
-                for param in self.model.layer3.parameters():
-                    param.requires_grad = True
+                # # Freeze layer1 + layer2
+                # for param in self.model.layer1.parameters():
+                #     param.requires_grad = False
+                # for param in self.model.layer2.parameters():
+                #     param.requires_grad = False
+                # # Open layer3 + layer4
+                # for param in self.model.layer3.parameters():
+                #     param.requires_grad = True
 
                 # bias_optimizer = optim.SGD(self.bias_layers[inc_i].parameters(), lr=lr, momentum=0.9)
                 # bias_optimizer = optim.Adam(self.bias_layers[-1].parameters(), lr=0.001) #version 1: only train the last bias layer #inc-1 -> -1
@@ -435,7 +458,7 @@ class Trainer:
             
             print("Model FC out_features:", self.model.fc.out_features)
 
-            for epoch in range(int(epoches)):
+            for epoch in range(int(epoches/3*2)):
                 print("---"*20)
                 print("current incremental task : ", inc_i)
                 print("Epoch", epoch)
@@ -746,6 +769,7 @@ class Trainer:
             feat_new = feats
         ##    feature_loss = F.mse_loss(feat_new, feat_old)
             feature_loss = 0
+            # alpha = 0
             # attn_loss /= len(feats)
             loss = alpha * loss_soft_target * T * T + alpha * feature_loss + (1 - alpha) * loss_hard_target 
 

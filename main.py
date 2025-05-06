@@ -13,7 +13,7 @@ parser.add_argument('--init_cls', default = 0, type = int)
 parser.add_argument('--distill_temperature', default = 1, type = float)
 parser.add_argument('--bias_lr', default = 0.001, type = float)
 parser.add_argument('--beta',default= 0.0, type = float)
-parser.add_argument('--resume_task', default = 0, type = int)
+parser.add_argument('--resume_task', default = 1, type = int)
 args = parser.parse_args()
 
 
