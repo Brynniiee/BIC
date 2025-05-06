@@ -92,7 +92,7 @@ class Trainer:
         print("Solver total trainable parameters : ", total_params)
 
 
-    def expand_model(self, new_cls):
+    def expand_model(self, new_cls, inc_i):
         old_state_dict = self.model.state_dict()
         # define new model with expanded fc layer
         self.model = PreResNet(47, self.total_cls + new_cls).cuda()     
@@ -105,35 +105,35 @@ class Trainer:
         self.model.load_state_dict(new_state_dict)  # 
         self.seen_cls += new_cls  # update seen_cls  
 
-    def expand_model(self, new_cls,inc_i):
-        old_state_dict = self.model.state_dict()
-        # define new model with expanded fc layer
-        self.model = PreResNet(47, self.total_cls + new_cls).cuda()
-        new_state_dict = self.model.state_dict()
+    # def expand_model(self, new_cls,inc_i):
+    #     old_state_dict = self.model.state_dict()
+    #     # define new model with expanded fc layer
+    #     self.model = PreResNet(47, self.total_cls + new_cls).cuda()
+    #     new_state_dict = self.model.state_dict()
 
-        # Copy all old feature extractor weights
-        for name, param in old_state_dict.items():
-            if "fc" not in name: # remain all old params in other layers
-                new_state_dict[name] = param
-        if inc_i > 0:
-            # Copy fc weights of old classes
-            old_fc_weight = old_state_dict['fc.weight']  # shape: [old_cls, dim]
-            old_fc_bias = old_state_dict['fc.bias']      # shape: [old_cls]
-            print('old class number:',self.seen_cls)
-            new_state_dict['fc.weight'][:old_fc_weight.shape[0]] = old_fc_weight
-            new_state_dict['fc.bias'][:old_fc_weight.shape[0]] = old_fc_bias
+    #     # Copy all old feature extractor weights
+    #     for name, param in old_state_dict.items():
+    #         if "fc" not in name: # remain all old params in other layers
+    #             new_state_dict[name] = param
+    #     if inc_i > 0:
+    #         # Copy fc weights of old classes
+    #         old_fc_weight = old_state_dict['fc.weight']  # shape: [old_cls, dim]
+    #         old_fc_bias = old_state_dict['fc.bias']      # shape: [old_cls]
+    #         print('old class number:',self.seen_cls)
+    #         new_state_dict['fc.weight'][:old_fc_weight.shape[0]] = old_fc_weight
+    #         new_state_dict['fc.bias'][:old_fc_weight.shape[0]] = old_fc_bias
 
-            # load weights
-            self.model.load_state_dict(new_state_dict)
+    #         # load weights
+    #         self.model.load_state_dict(new_state_dict)
 
-            # # Freeze all
-            self.model.fc.weight.requires_grad = False
-            self.model.fc.bias.requires_grad = False
+    #         # # Freeze all
+    #         # self.model.fc.weight.requires_grad = False
+    #         # self.model.fc.bias.requires_grad = False
 
-            # # Unfreeze new classes
-            self.model.fc.weight[self.seen_cls:].requires_grad = True
-            self.model.fc.bias[self.seen_cls:].requires_grad = True
-            # # cannot ""... = False" part of params in a layer
+    #         # # Unfreeze new classes
+    #         # self.model.fc.weight[self.seen_cls:].requires_grad = True
+    #         # self.model.fc.bias[self.seen_cls:].requires_grad = True
+    #         # # cannot ""... = False" part of params in a layer
 
         # update seen_cls
         self.seen_cls += new_cls
@@ -300,7 +300,7 @@ class Trainer:
                         self.total_cls = pickle.load(f)
                     # fc expand
                     if self.total_cls > 0:
-                        self.expand_model(self.total_cls)
+                        self.expand_model(self.total_cls,inc_i)
                     # recover model params
                     self.model.load_state_dict(torch.load(f'model{resume_task-1}.pth'))
                     self.previous_model = deepcopy(self.model)
@@ -396,14 +396,14 @@ class Trainer:
                 scheduler = CosineAnnealingLR(optimizer, T_max=40)
 
             if inc_i > 0:               # Biaslayer trained only if there is bias correction
-                # Freeze layer1 + layer2
-                for param in self.model.layer1.parameters():
-                    param.requires_grad = False
-                for param in self.model.layer2.parameters():
-                    param.requires_grad = False
-                # Open layer3 + layer4
-                for param in self.model.layer3.parameters():
-                    param.requires_grad = True
+                # # Freeze layer1 + layer2
+                # for param in self.model.layer1.parameters():
+                #     param.requires_grad = False
+                # for param in self.model.layer2.parameters():
+                #     param.requires_grad = False
+                # # Open layer3 + layer4
+                # for param in self.model.layer3.parameters():
+                #     param.requires_grad = True
 
                 # bias_optimizer = optim.SGD(self.bias_layers[inc_i].parameters(), lr=lr, momentum=0.9)
                 # bias_optimizer = optim.Adam(self.bias_layers[-1].parameters(), lr=0.001) #version 1: only train the last bias layer #inc-1 -> -1
@@ -464,7 +464,7 @@ class Trainer:
             test_accs_noBiC.append(test_acc_noBic)
             per_class_accuracies_noBiC.append(per_class_accuracy_noBiC)
             if inc_i > 0:
-                for epoch in range(int(epoches)):
+                for epoch in range(int(epoches/3*4)):
                     # bias_scheduler.step()
                     with torch.no_grad():
                         self.model.eval()
@@ -538,12 +538,12 @@ class Trainer:
         print(f"Plot saved at: {save_path}")
 
         # loss visualization 
-        if distill_loss_all_tasks is not None and ce_loss_all_tasks is not None:
+        if distill_loss_all_tasks is not None and ce_loss_all_tasks is not None and feature_loss_all_tasks is not None:
             fig, axs = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
 
-            losses = [distill_loss_all_tasks, ce_loss_all_tasks]
-            titles = ["Distill loss", "CE loss"]
-            ylabels = ["Distill loss", "CE loss"]
+            losses = [distill_loss_all_tasks, ce_loss_all_tasks, feature_loss_all_tasks]
+            titles = ["Distill loss", "CE loss", "Feature loss"]
+            ylabels = ["Distill loss", "CE loss", "Feature loss"]
 
             for ax, loss_task_list, title, ylabel in zip(axs, losses, titles, ylabels):
                 for i in range(len(loss_task_list)):
@@ -732,7 +732,18 @@ class Trainer:
             logp = F.log_softmax(p[:,:self.seen_cls-num_new_cls]/T, dim=1)       
             # loss_soft_target = -torch.mean(torch.sum(pre_p * logp, dim=1))
             loss_soft_target = F.kl_div(logp, pre_p, reduction='batchmean')
-            loss_hard_target = nn.CrossEntropyLoss()(p[:,:self.seen_cls], label)
+            
+            old_cls = self.seen_cls - self.num_new_cls[-1]                    
+            old_weight = 5
+            logits = p[:, :self.seen_cls]
+            # weight vector for classes (size = [seen_cls])
+            class_weights = torch.ones(self.seen_cls).cuda()
+            class_weights[:old_cls] = old_weight   
+            # 3. CrossEntropyLoss with per-class weight
+            ce_criterion = nn.CrossEntropyLoss(weight=class_weights)
+            loss_hard_target = ce_criterion(logits, label)
+            
+            # loss_hard_target = nn.CrossEntropyLoss()(p[:,:self.seen_cls], label)
             # attn_loss = 0
             # for f, pf in zip(feats, pre_feats):
             #     attn = self.get_attention_map(f)
@@ -744,10 +755,10 @@ class Trainer:
             #         print("Non-finite teacher_attn:", pre_attn)
             feat_old = pre_feats
             feat_new = feats
-        ##    feature_loss = F.mse_loss(feat_new, feat_old)
-            feature_loss = 0
+            feature_loss = F.mse_loss(feat_new, feat_old)
+            # feature_loss = 0
             # attn_loss /= len(feats)
-            loss = alpha * loss_soft_target * T * T + alpha * feature_loss + (1 - alpha) * loss_hard_target 
+            loss = alpha * loss_soft_target * T * T +  10 * alpha * feature_loss + (1 - alpha) * loss_hard_target 
 
             loss.backward(retain_graph=True)
             if (i + 1) % accumulation_steps == 0:
@@ -755,11 +766,11 @@ class Trainer:
                 optimizer.zero_grad()
             distill_losses.append(loss_soft_target.item())
             ce_losses.append(loss_hard_target.item())
-        ##    feature_losses.append(feature_loss.item())
+            feature_losses.append(feature_loss.item())
             distill_loss_epoch_mean = np.mean(distill_losses)
             ce_loss_epoch_mean = np.mean(ce_losses)
-        ##    feature_loss_epoch_mean = np.mean(feature_losses)
-            feature_loss_epoch_mean = 0
+            feature_loss_epoch_mean = np.mean(feature_losses)
+            # feature_loss_epoch_mean = 0
         print("stage1 distill loss :", distill_loss_epoch_mean, "ce loss :", ce_loss_epoch_mean, "feature loss :", feature_loss_epoch_mean)
         return distill_loss_epoch_mean, ce_loss_epoch_mean, feature_loss_epoch_mean
 
