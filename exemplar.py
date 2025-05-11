@@ -256,15 +256,24 @@ class Exemplar:
 
         return exemplars_by_class
     
-    def select_exemplars_icarl_from_features(self, features, labels, centroids, num_exemplars_per_class, raw_images, use_kmeans=True):
+    def select_exemplars_icarl_herding_diversity(self, features, labels, centroids, num_exemplars_per_class, raw_images, diversity_lambda=0.75):
         """
-        iCaRL exemplar 选样：K-Means + Random 版
+        iCaRL exemplar selection with Herding + explicit MMD-based Diversity
+
+        Args:
+            features: Tensor [N, D] — normalized feature embeddings
+            labels: Tensor [N] — class labels
+            centroids: Tensor [C, D] — class means
+            num_exemplars_per_class: int — number of exemplars per class
+            raw_images: list — corresponding raw data samples
+            diversity_lambda: float — balance factor for diversity
+
+        Returns:
+            exemplars_by_class: dict {class_id: (exemplar_imgs, labels)}
         """
         import torch
         import numpy as np
-        from sklearn.cluster import KMeans
 
-        # Step 1: 归一化
         device = features.device
         features = features / features.norm(dim=1, keepdim=True)
         centroids = centroids / centroids.norm(dim=1, keepdim=True)
@@ -282,32 +291,53 @@ class Exemplar:
             cls_feats = features[cls_indices]  # shape [n_cls, D]
             cls_imgs = [raw_images[i] for i in cls_indices.tolist()]
 
-            # 取原始特征 (numpy) 用于 KMeans
-            feats_np = cls_feats.cpu().numpy()
+            n_samples = len(cls_feats)
+            n_exemplars = min(num_exemplars_per_class, n_samples)
 
-            n_clusters = min(num_exemplars_per_class, len(feats_np))
-            if n_clusters < 2 or not use_kmeans:
-                # 样本太少 or 不用KMeans → fallback 原样本随机选
-                selected_local_indices = np.random.choice(len(cls_feats), size=n_clusters, replace=False)
-            else:
-                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-                labels_kmeans = kmeans.fit_predict(feats_np)
-                # 每个 cluster 中随机选1个样本
-                selected_local_indices = []
-                for cluster_id in np.unique(labels_kmeans):
-                    members = np.where(labels_kmeans == cluster_id)[0]
-                    selected_local_indices.append(np.random.choice(members))
+            mu = centroids[cls].unsqueeze(0)  # [1, D]
 
-            selected_indices = cls_indices[selected_local_indices]
+            # Herding + Diversity selection
+            selected_local_indices = []
+            selected_feats = []  # 已选样本的特征
+
+            candidates = list(range(n_samples))
+
+            for _ in range(n_exemplars):
+                best_score = None
+                best_idx = None
+
+                for idx in candidates:
+                    feat = cls_feats[idx].unsqueeze(0)  # [1, D]
+                    
+                    # representativeness: 距离均值越近越好 (负平方距离)
+                    rep_score = -torch.norm(feat - mu, p=2).item() ** 2
+
+                    # diversity: 距离已有样本越远越好
+                    if selected_feats:
+                        dists = [torch.norm(feat - sf, p=2).item() ** 2 for sf in selected_feats]
+                        diversity_score = np.mean(dists)
+                    else:
+                        diversity_score = 0
+
+                    total_score = rep_score + diversity_lambda * diversity_score
+
+                    if (best_score is None) or (total_score > best_score):
+                        best_score = total_score
+                        best_idx = idx
+
+                selected_local_indices.append(best_idx)
+                selected_feats.append(cls_feats[best_idx])
+                candidates.remove(best_idx)
+
+            selected_indices = cls_indices[torch.tensor(selected_local_indices, device=device)]
             selected_imgs = [cls_imgs[i] for i in selected_local_indices]
 
             # 更新掩码
             selected_mask[selected_indices] = True
 
-            # 存储 (imgs, labels) tuple
             exemplars_by_class[cls] = ([img.squeeze(0) for img in selected_imgs], [cls] * len(selected_imgs))
-            
-        # Step 3: 可视化
+
+        # 可视化
         self.visualize_feature_space(
             features=features.cpu(),
             all_labels=labels.cpu(),
@@ -316,10 +346,9 @@ class Exemplar:
             method='tsne'
         )
 
-        # Step 4: 存 self.train （保持和旧版一致）
         self.train = exemplars_by_class
-
         return exemplars_by_class
+
 
     def visualize_feature_space(self, features, all_labels, selected_mask, centroids, method='tsne'):
         import os

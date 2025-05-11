@@ -8,12 +8,12 @@ parser = argparse.ArgumentParser(description='Incremental Learning BIC')
 parser.add_argument('--batch_size', default = 8, type = int)
 parser.add_argument('--epoch', default = 10, type = int) # small values for debug
 parser.add_argument('--lr', default = 0.01, type = float) 
-parser.add_argument('--max_size', default = 800, type = int)
+parser.add_argument('--max_size', default = 100, type = int)
 parser.add_argument('--init_cls', default = 0, type = int)  #### total_cls=100 -> init_cls=0
 parser.add_argument('--distill_temperature', default = 1, type = float)
 parser.add_argument('--bias_lr', default = 0.001, type = float)
 parser.add_argument('--beta',default= 0.0, type = float)
-parser.add_argument('--resume_task', default = 1, type = int)
+parser.add_argument('--resume_task', default = 0, type = int)
 args = parser.parse_args()
 
 
